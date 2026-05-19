@@ -15,7 +15,7 @@ pip install pillow
 The renderer is pre-configured to look for specific fonts in the local directory to maintain typographic visual hierarchy:
  * **ZenKakuGothicNew-Bold.ttf** (Used for active, scaling, and bold titles)
  * **ZenKakuGothicNew-Regular.ttf** (Used for idle text and the system watermark)
-> 💡 **Note:** If these specific .ttf files are missing, the utility will automatically fall back to standard system default bitmaps without crashing.
+> **Note:** If these specific .ttf files are missing, the utility will automatically fall back to standard system default bitmaps without crashing.
 > 
 ## Step 1: Convert Lyrics (.lrc to .ttml)
 If your lyrics are in standard timestamped .lrc formatting, convert them first using the parser pipeline.
@@ -59,8 +59,10 @@ For custom adjustments, the following layout constants can be tuned directly in 
 | SIZE_ACTIVE | 96 | Dynamic text footprint when element receives active tracking focus |
 | WORD_FADE_DUR | 0.18 | Interpolation timeframe curve length for alpha color transitions |
 ### Word-for-Word Lyrics
-To get word-for-word lyrics syncing, use https://distrokid.com/potato to first get a line-by-line TTML by manually holding the spacebar down when a line is being sung.
-After that, use the included HTML, upload the TTML from LyricPotato, the same music file you used, and start stamping words from what you hear.
+To get word-for-word lyrics syncing, first get a line-by-line TTML.
+After that, use the included HTML, upload the TTML, the same music file you used, and start stamping words from what you hear.
 After finishing stamping, press the export button, download/copy the TTML and pass it inside the input flag. Nuisance will automatically detect that it is a line-by-line TTML.
 
 If you do not wish to use the HTML, you can also use https://nuisance.patchednexus.win/ .
+### Lyric File Sources
+You can obtain lyric files from other sources if you prefer to avoid manually creating one from sources such as Python syncedlyrics, LRCLIB or any other source, then use the provided lrc2ttml.py to convert it to a TTML.
