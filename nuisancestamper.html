@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nuisance Stamper</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Noto+Sans+JP:wght@400;700&display=swap');
+
+:root {
+  --bg:      #07070f;
+  --s1:      #0e0e1c;
+  --s2:      #151523;
+  --border:  #1c1c32;
+  --accent:  #7cf0c8;
+  --accent2: #f07c9a;
+  --accent3: #c8a0f0;
+  --text:    #d0d0ea;
+  --muted:   #42426a;
+  --dim:     #1e1e38;
+  --font:    'IBM Plex Mono', monospace;
+  --jp:      'Noto Sans JP', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px 16px 48px;
+  gap: 0;
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 60% 35% at 10% 0%, rgba(124,240,200,0.04) 0%, transparent 65%),
+    radial-gradient(ellipse 45% 45% at 90% 100%, rgba(200,160,240,0.035) 0%, transparent 65%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.wrap {
+  position: relative;
+  width: 100%;
+  max-width: 700px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 1;
+}
+
+/* ── HEADER ── */
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 2px 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.app-name {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text);
+}
+.app-name em { color: var(--accent2); font-style: normal; }
+.app-ver {
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.app-tagline {
+  margin-left: auto;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+/* ── PANEL ── */
+.panel {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.panel-head {
+  font-size: 8px;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.panel-head em { color: var(--accent); font-style: normal; }
+.panel-head em.r { color: var(--accent2); }
+
+label {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+  margin-bottom: 5px;
+  display: block;
+  text-transform: uppercase;
+}
+
+input[type=file], input[type=text] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input[type=file] { color: var(--muted); cursor: pointer; }
+input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(124,240,200,0.08);
+}
+
+button {
+  background: var(--accent);
+  color: #07070f;
+  border: none;
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: opacity 0.1s, transform 0.06s, box-shadow 0.1s;
+  white-space: nowrap;
+}
+button:hover { opacity: 0.85; box-shadow: 0 0 12px rgba(124,240,200,0.2); }
+button:active { transform: scale(0.96); }
+button.ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+button.ghost:hover { color: var(--text); border-color: var(--muted); box-shadow: none; }
+button.red { background: var(--accent2); color: #07070f; }
+button.red:hover { box-shadow: 0 0 12px rgba(240,124,154,0.25); }
+button.purple { background: var(--accent3); color: #07070f; }
+button.purple:hover { box-shadow: 0 0 12px rgba(200,160,240,0.25); }
+
+audio {
+  width: 100%;
+  filter: invert(1) hue-rotate(150deg) saturate(0.4) brightness(0.85);
+  border-radius: 4px;
+  height: 32px;
+}
+
+/* ── STAMP SCREEN ── */
+#stamp-screen { display: none; flex-direction: column; gap: 10px; }
+
+/* lyric scroll */
+.lyric-scroll {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 140px;
+  overflow: hidden;
+}
+.scroll-line {
+  font-family: var(--jp);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  color: var(--muted);
+  transition: all 0.2s ease;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+.scroll-line.past {
+  color: #1e1e40;
+  font-size: 11px;
+}
+.scroll-line.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(124,240,200,0.04);
+  font-size: 14px;
+  font-weight: 700;
+}
+.scroll-line.future { color: #2e2e50; }
+.scroll-line.near { color: var(--muted); }
+
+/* syllable strip */
+.syl-strip {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px 22px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 62px;
+  align-items: center;
+  overflow-x: auto;
+  position: relative;
+}
+.syl-chip {
+  font-family: var(--jp);
+  font-size: 16px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  position: relative;
+  flex-shrink: 0;
+  transition: all 0.1s ease;
+  /* default: upcoming, dimmed */
+  background: var(--dim);
+  color: #2a2a50;
+  border-color: transparent;
+}
+/* near (next 3 lines visible) */
+.syl-chip.near {
+  color: #484868;
+  background: var(--dim);
+}
+/* current line, pending */
+.syl-chip.pending {
+  color: #6060a0;
+  background: rgba(96,96,160,0.08);
+  border-color: #2a2a50;
+}
+/* stamped */
+.syl-chip.done {
+  background: rgba(124,240,200,0.06);
+  color: var(--accent);
+  border-color: rgba(124,240,200,0.18);
+}
+.syl-chip.done .syl-time { display: block; }
+/* next to stamp */
+.syl-chip.current {
+  background: var(--accent);
+  color: #07070f;
+  transform: scale(1.1);
+  border-color: transparent;
+  box-shadow: 0 0 18px rgba(124,240,200,0.35);
+}
+.syl-time {
+  display: none;
+  position: absolute;
+  bottom: -16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font);
+  font-size: 7px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* big stamp zone */
+.stamp-zone {
+  background: var(--s2);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  padding: 22px 20px 18px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: border-color 0.06s, background 0.06s, box-shadow 0.06s;
+}
+.stamp-zone:hover { border-color: var(--muted); }
+.stamp-zone.hit {
+  border-color: var(--accent);
+  background: rgba(124,240,200,0.05);
+  box-shadow: 0 0 24px rgba(124,240,200,0.1);
+}
+.stamp-zone.idle { border-color: var(--border); opacity: 0.45; cursor: default; }
+.stamp-zone.done-all { border-color: var(--accent3); }
+
+.sz-cur {
+  font-family: var(--jp);
+  font-size: 54px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+  margin-bottom: 6px;
+  transition: transform 0.06s;
+}
+.sz-nxt {
+  font-family: var(--jp);
+  font-size: 20px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  min-height: 26px;
+}
+.sz-hint {
+  font-size: 8px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.6;
+}
+.sz-hint em { color: var(--accent2); font-style: normal; }
+
+/* status bar */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.timer {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  letter-spacing: -0.02em;
+}
+.timer .ms { font-size: 11px; color: var(--muted); }
+.line-badge {
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+  background: var(--dim);
+  border-radius: 3px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+.line-badge em { color: var(--accent2); font-style: normal; }
+.prog-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.prog-bar { background: var(--border); border-radius: 2px; height: 2px; overflow: hidden; }
+.prog-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+.prog-txt { font-size: 8px; color: var(--muted); text-align: right; letter-spacing: 0.08em; }
+
+/* countdown */
+.countdown {
+  height: 2px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.countdown-fill {
+  height: 100%;
+  background: var(--accent2);
+  border-radius: 2px;
+  transition: width 0.05s linear;
+}
+
+.ctrl-row { display: flex; gap: 8px; align-items: center; }
+
+/* dots */
+.line-dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 12px;
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); transition: background 0.1s; }
+.dot.done { background: var(--accent); }
+.dot.active { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+
+/* ── EXPORT ── */
+#export-screen { display: none; flex-direction: column; gap: 11px; }
+.tab-row { display: flex; gap: 6px; }
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-size: 8px;
+  letter-spacing: 0.22em;
+  padding: 7px 13px;
+  border-radius: 4px;
+}
+.tab.on { background: var(--accent); color: #07070f; border-color: var(--accent); }
+pre#out {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 14px 16px;
+  font-size: 10px;
+  line-height: 1.9;
+  color: var(--text);
+  white-space: pre;
+  overflow: auto;
+  max-height: 340px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.export-btns { display: flex; gap: 8px; }
+
+/* flash */
+@keyframes chipflash {
+  0%   { box-shadow: 0 0 0 4px rgba(124,240,200,0.4); }
+  100% { box-shadow: none; }
+}
+.syl-chip.flash { animation: chipflash 0.18s ease-out; }
+
+@keyframes zoneflash {
+  0%   { transform: scale(1.01); }
+  100% { transform: scale(1); }
+}
+.stamp-zone.flash-zone { animation: zoneflash 0.1s ease-out; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="app-header">
+  <span class="app-name"><em>Nuisance</em> Stamper</span>
+  <span class="app-ver">v3</span>
+  <span class="app-tagline">syllable timing tool</span>
+</div>
+
+<!-- SETUP -->
+<div class="panel" id="setup-screen">
+  <div class="panel-head">01 — load files</div>
+  <div><label>Audio file</label><input type="file" id="f-audio" accept="audio/*"></div>
+  <div><label>LyricPotato TTML (line-level)</label><input type="file" id="f-ttml" accept="*"></div>
+  <div><label>Song title</label><input type="text" id="f-title" placeholder="Untitled"></div>
+  <button id="btn-start">Load →</button>
+</div>
+
+<!-- STAMP -->
+<div id="stamp-screen">
+
+  <div class="panel" style="gap:8px;padding:12px 16px;">
+    <div class="panel-head">02 — stamp · <em>any key / tap = stamp</em> · <em class="r">backspace = undo</em></div>
+    <audio id="audio" controls></audio>
+  </div>
+
+  <div class="status-bar">
+    <div class="timer" id="timer">00:00<span class="ms">.000</span></div>
+    <div class="line-badge" id="line-window">line <em>—</em></div>
+    <div class="prog-wrap">
+      <div class="prog-bar"><div class="prog-fill" id="pfill" style="width:0%"></div></div>
+      <div class="prog-txt" id="ptxt">0 / 0 lines</div>
+    </div>
+  </div>
+
+  <div class="countdown"><div class="countdown-fill" id="countdown-fill" style="width:0%"></div></div>
+
+  <div class="lyric-scroll" id="lyric-scroll"></div>
+
+  <div class="syl-strip" id="syl-strip"></div>
+
+  <div class="stamp-zone idle" id="stamp-zone">
+    <div class="sz-cur" id="sz-cur">—</div>
+    <div class="sz-nxt" id="sz-nxt"></div>
+    <div class="sz-hint">tap here or press <em>any key</em> · <em>backspace</em> = undo</div>
+  </div>
+
+  <div class="line-dots" id="line-dots"></div>
+
+  <div class="ctrl-row">
+    <button class="ghost" id="btn-undo">↩ undo</button>
+    <div style="flex:1"></div>
+    <button class="purple" id="btn-export">Export ↓</button>
+    <button class="ghost red" id="btn-reset">↺</button>
+  </div>
+</div>
+
+<!-- EXPORT -->
+<div id="export-screen" class="panel">
+  <div class="panel-head">03 — export</div>
+  <div class="tab-row">
+    <button class="tab on" onclick="setTab('ttml',this)">TTML</button>
+    <button class="tab" onclick="setTab('lrc',this)">Enhanced LRC</button>
+  </div>
+  <pre id="out"></pre>
+  <div class="export-btns">
+    <button id="btn-copy" style="flex:1">Copy</button>
+    <button id="btn-download" class="ghost" style="flex:1">↓ Download</button>
+    <button class="ghost" onclick="document.getElementById('export-screen').style.display='none'">Close</button>
+  </div>
+</div>
+
+</div>
+
+<script>
+// ── state ──────────────────────────────────────
+let lines      = [];
+let lineIdx    = -1;
+let sylIdx     = 0;
+let audioEl    = null;
+let raf        = null;
+let currentTab = 'ttml';
+
+// ── setup ──────────────────────────────────────
+document.getElementById('btn-start').addEventListener('click', async () => {
+  const fa = document.getElementById('f-audio');
+  const ft = document.getElementById('f-ttml');
+  if (!fa.files.length) return alert('Select an audio file.');
+  if (!ft.files.length) return alert('Select a TTML file.');
+
+  const xml = await ft.files[0].text();
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const NS  = 'http://www.w3.org/ns/ttml';
+  let ps    = [...doc.getElementsByTagNameNS(NS, 'p')];
+  if (!ps.length) ps = [...doc.getElementsByTagName('p')];
+  if (!ps.length) return alert('No <p> elements found.');
+
+  lines = ps.map(p => ({
+    text:      p.textContent.trim(),
+    begin:     parseTTML(p.getAttribute('begin')),
+    end:       parseTTML(p.getAttribute('end')),
+    syllables: splitMora(p.textContent.trim()),
+    stamps:    []
+  }));
+
+  audioEl = document.getElementById('audio');
+  audioEl.src = URL.createObjectURL(fa.files[0]);
+  lineIdx = -1;
+  sylIdx  = 0;
+
+  document.getElementById('setup-screen').style.display = 'none';
+  document.getElementById('stamp-screen').style.display = 'flex';
+
+  buildDots();
+  buildLyricScroll();
+  updateSylStrip();
+  updateStampZone();
+  startLoop();
+});
+
+// ── RAF loop ─────────────────────────────────
+function startLoop() {
+  function tick() {
+    const t = audioEl ? audioEl.currentTime : 0;
+    updateTimer(t);
+    driveLines(t);
+    updateCountdown(t);
+    raf = requestAnimationFrame(tick);
+  }
+  raf = requestAnimationFrame(tick);
+}
+
+function updateTimer(t) {
+  const mm = String(Math.floor(t/60)).padStart(2,'0');
+  const ss = String(Math.floor(t%60)).padStart(2,'0');
+  const ms = String(Math.floor((t%1)*1000)).padStart(3,'0');
+  document.getElementById('timer').innerHTML = `${mm}:${ss}<span class="ms">.${ms}</span>`;
+}
+
+function driveLines(t) {
+  let newIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (t >= lines[i].begin && t < lines[i].end) { newIdx = i; break; }
+    if (i === 0 && t < lines[0].begin) { newIdx = -1; break; }
+  }
+  if (newIdx === -1 && lines.length && t >= lines[lines.length-1].end)
+    newIdx = lines.length;
+
+  if (newIdx !== lineIdx) {
+    if (newIdx > lineIdx && newIdx < lines.length) {
+      lineIdx = newIdx;
+      sylIdx  = lines[lineIdx].stamps.length;
+    } else if (newIdx < lineIdx) {
+      lineIdx = newIdx;
+      sylIdx  = newIdx >= 0 ? lines[lineIdx].stamps.length : 0;
+    } else {
+      lineIdx = newIdx;
+      sylIdx  = 0;
+    }
+    onLineChange();
+  }
+}
+
+function onLineChange() {
+  sylIdx = lineIdx >= 0 && lineIdx < lines.length ? lines[lineIdx].stamps.length : 0;
+  updateLyricScroll();
+  updateSylStrip();
+  updateStampZone();
+  updateProgress();
+  updateDots();
+}
+
+function updateCountdown(t) {
+  if (lineIdx < 0 || lineIdx >= lines.length) {
+    document.getElementById('countdown-fill').style.width = '0%';
+    return;
+  }
+  const line = lines[lineIdx];
+  const pct  = Math.min(100, ((t - line.begin) / (line.end - line.begin)) * 100);
+  document.getElementById('countdown-fill').style.width = pct + '%';
+}
+
+// ── stamp ─────────────────────────────────────
+function stamp() {
+  if (lineIdx < 0 || lineIdx >= lines.length) return;
+  const line = lines[lineIdx];
+  if (sylIdx >= line.syllables.length) return;
+
+  const t   = audioEl.currentTime;
+  const tok = line.syllables[sylIdx];
+  const syl = typeof tok === 'object' ? tok.ttml : tok;
+
+  if (line.stamps.length && line.stamps[line.stamps.length-1].end == null)
+    line.stamps[line.stamps.length-1].end = t;
+
+  line.stamps.push({ syl, t, end: null });
+  sylIdx++;
+
+  flashZone();
+  updateSylStrip();
+  updateStampZone();
+
+  if (sylIdx >= line.syllables.length)
+    line.stamps[line.stamps.length-1].end = line.end;
+}
+
+function undo() {
+  if (lineIdx < 0 || lineIdx >= lines.length) return;
+  const line = lines[lineIdx];
+  if (line.stamps.length === 0) {
+    if (lineIdx === 0) return;
+    lineIdx--;
+    const prev = lines[lineIdx];
+    if (prev.stamps.length) prev.stamps.pop();
+    sylIdx = prev.stamps.length;
+    onLineChange();
+    return;
+  }
+  line.stamps.pop();
+  sylIdx = line.stamps.length;
+  updateSylStrip();
+  updateStampZone();
+}
+
+// ── input ─────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (document.getElementById('stamp-screen').style.display !== 'flex') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  e.preventDefault();
+  if (e.code === 'Backspace') { undo(); return; }
+  stamp();
+});
+document.getElementById('stamp-zone').addEventListener('pointerdown', e => {
+  e.preventDefault(); stamp();
+});
+document.getElementById('btn-undo').addEventListener('click', undo);
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (!confirm('Clear all stamps?')) return;
+  lines.forEach(l => l.stamps = []);
+  sylIdx = 0;
+  onLineChange();
+});
+document.getElementById('btn-export').addEventListener('click', () => {
+  document.getElementById('export-screen').style.display = 'flex';
+  renderExport();
+  document.getElementById('export-screen').scrollIntoView({ behavior: 'smooth' });
+});
+
+// ── lyric scroll ──────────────────────────────
+function buildLyricScroll() {
+  const el = document.getElementById('lyric-scroll');
+  el.innerHTML = lines.map((l, i) =>
+    `<div class="scroll-line future" id="sl-${i}">${escXML(l.text)}</div>`
+  ).join('');
+}
+function updateLyricScroll() {
+  lines.forEach((_, i) => {
+    const el = document.getElementById(`sl-${i}`);
+    if (!el) return;
+    const dist = i - lineIdx;
+    if (i < lineIdx)       el.className = 'scroll-line past';
+    else if (i === lineIdx) el.className = 'scroll-line active';
+    else if (dist <= 2)    el.className = 'scroll-line near';
+    else                    el.className = 'scroll-line future';
+  });
+  const active = document.getElementById(`sl-${lineIdx}`);
+  if (active) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+// ── syl strip ─────────────────────────────────
+// Shows syllables for current line with contextual dimming
+function updateSylStrip() {
+  const line = lineIdx >= 0 && lineIdx < lines.length ? lines[lineIdx] : null;
+  const strip = document.getElementById('syl-strip');
+  if (!line) { strip.innerHTML = ''; return; }
+
+  strip.innerHTML = line.syllables.map((tok, i) => {
+    const stmp = line.stamps[i];
+    let cls;
+    if (i < sylIdx)      cls = 'done';
+    else if (i === sylIdx) cls = 'current';
+    else                   cls = 'pending'; // in current line but not yet stamped
+    const ts  = stmp ? fmtShort(stmp.t) : '';
+    const d   = typeof tok === 'object' ? tok.display : tok;
+    return `<div class="syl-chip ${cls}" id="chip-${i}">${escXML(d)}<span class="syl-time">${ts}</span></div>`;
+  }).join('');
+
+  const cur = document.getElementById(`chip-${sylIdx}`);
+  if (cur) cur.scrollIntoView({ block: 'nearest', inline: 'center' });
+}
+
+// ── stamp zone ───────────────────────────────
+function updateStampZone() {
+  const zone = document.getElementById('stamp-zone');
+  const line = lineIdx >= 0 && lineIdx < lines.length ? lines[lineIdx] : null;
+
+  if (!line) {
+    zone.classList.add('idle');
+    zone.classList.remove('done-all');
+    document.getElementById('sz-cur').textContent = '—';
+    document.getElementById('sz-nxt').textContent = '';
+    return;
+  }
+  if (lineIdx >= lines.length) {
+    zone.classList.add('done-all');
+    document.getElementById('sz-cur').textContent = '✓';
+    document.getElementById('sz-nxt').textContent = 'all done';
+    return;
+  }
+  zone.classList.remove('idle','done-all');
+  const tokCur = line.syllables[sylIdx];
+  const tokNxt = line.syllables[sylIdx+1];
+  document.getElementById('sz-cur').textContent = tokCur ? (typeof tokCur==='object' ? tokCur.display : tokCur) : '↵';
+  document.getElementById('sz-nxt').textContent = tokNxt ? (typeof tokNxt==='object' ? tokNxt.display : tokNxt) : '';
+}
+
+// ── progress ─────────────────────────────────
+function updateProgress() {
+  const pct = lines.length ? (Math.max(0,lineIdx) / lines.length) * 100 : 0;
+  document.getElementById('pfill').style.width = pct + '%';
+  document.getElementById('ptxt').textContent = `${Math.max(0,lineIdx)+1} / ${lines.length} lines`;
+  const lw = lineIdx >= 0 && lineIdx < lines.length
+    ? `line <em>${lineIdx+1}</em>`
+    : lineIdx >= lines.length ? 'done' : 'waiting';
+  document.getElementById('line-window').innerHTML = lw;
+}
+
+// ── dots ──────────────────────────────────────
+function buildDots() {
+  document.getElementById('line-dots').innerHTML =
+    lines.map((_,i) => `<div class="dot" id="dot-${i}"></div>`).join('');
+}
+function updateDots() {
+  lines.forEach((_,i) => {
+    const d = document.getElementById(`dot-${i}`);
+    if (!d) return;
+    d.className = 'dot' + (i < lineIdx ? ' done' : i === lineIdx ? ' active' : '');
+  });
+}
+
+function flashZone() {
+  const z = document.getElementById('stamp-zone');
+  z.classList.remove('hit','flash-zone');
+  void z.offsetWidth;
+  z.classList.add('hit','flash-zone');
+  setTimeout(() => z.classList.remove('hit','flash-zone'), 100);
+  const chip = document.getElementById(`chip-${sylIdx-1}`);
+  if (chip) { chip.classList.add('flash'); setTimeout(() => chip.classList.remove('flash'), 180); }
+}
+
+// ── export ────────────────────────────────────
+function setTab(tab, el) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('on'));
+  el.classList.add('on');
+  renderExport();
+}
+function renderExport() {
+  document.getElementById('out').textContent =
+    currentTab === 'ttml' ? buildTTML() : buildLRC();
+}
+
+document.getElementById('btn-copy').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('out').textContent);
+  const btn = document.getElementById('btn-copy');
+  btn.textContent = 'Copied!';
+  setTimeout(() => btn.textContent = 'Copy', 1600);
+});
+
+document.getElementById('btn-download').addEventListener('click', () => {
+  const content  = document.getElementById('out').textContent;
+  const isTtml   = currentTab === 'ttml';
+  const ext      = isTtml ? 'ttml' : 'lrc';
+  const mime     = isTtml ? 'application/xml' : 'text/plain';
+  const title    = (document.getElementById('f-title').value || 'untitled')
+                     .replace(/[^a-z0-9_\-]/gi, '_');
+  const blob     = new Blob([content], { type: mime });
+  const url      = URL.createObjectURL(blob);
+  const a        = document.createElement('a');
+  a.href         = url;
+  a.download     = `${title}.${ext}`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+function buildTTML() {
+  const title = document.getElementById('f-title').value || 'Untitled';
+  const ps = lines.map(line => {
+    const begin = fmtTTML(line.begin);
+    const end   = fmtTTML(line.end);
+    if (!line.stamps.length)
+      return `    <p begin="${begin}" end="${end}">${escXML(line.text)}</p>`;
+    const spans = line.stamps.map(s =>
+      `      <span begin="${fmtTTML(s.t)}" end="${fmtTTML(s.end ?? s.t+0.1)}" xml:space="preserve">${escXML(s.syl)}</span>`
+    ).join('\n');
+    return `    <p begin="${begin}" end="${end}">\n${spans}\n    </p>`;
+  }).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:tts="http://www.w3.org/ns/ttml#styling"
+    xmlns:ttm="http://www.w3.org/ns/ttml#metadata"
+    xml:lang="ja">
+  <head><ttm:title>${escXML(title)}</ttm:title></head>
+  <body><div>
+${ps}
+  </div></body>
+</tt>`;
+}
+
+function buildLRC() {
+  return lines.map(line => {
+    const ts = lrcTs(line.begin);
+    if (!line.stamps.length) return `[${ts}]${line.text}`;
+    return `[${ts}]` + line.stamps.map(s => `<${lrcTs(s.t)}>${s.syl}`).join('');
+  }).join('\n');
+}
+
+// ── helpers ───────────────────────────────────
+function parseTTML(s) {
+  if (!s) return 0;
+  const p = s.split(':');
+  return parseFloat(p[0])*3600 + parseFloat(p[1])*60 + parseFloat(p[2]);
+}
+function splitMora(text) {
+  const small  = /^[ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ]/;
+  const isLatin = c => /[A-Za-z0-9''\-]/.test(c);
+  const tokens = [];
+  let i = 0;
+  const chars = [...text];
+  while (i < chars.length) {
+    const c = chars[i];
+    if (c === ' ' || c === '\u3000') {
+      if (tokens.length) tokens[tokens.length-1].ttml += c;
+      i++; continue;
+    }
+    if (isLatin(c)) {
+      let word = '';
+      while (i < chars.length && (isLatin(chars[i]) || chars[i] === ' ')) {
+        if (chars[i] === ' ') { word += ' '; i++; break; }
+        word += chars[i++];
+      }
+      tokens.push({ display: word.trimEnd(), ttml: word });
+    } else {
+      let mora = c; i++;
+      if (i < chars.length && small.test(chars[i])) { mora += chars[i]; i++; }
+      tokens.push({ display: mora, ttml: mora });
+    }
+  }
+  return tokens.filter(t => t.display.length > 0);
+}
+function fmtTTML(sec) {
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=Math.floor(sec%60), ms=Math.round((sec%1)*1000);
+  return `${pad(h)}:${pad(m)}:${pad(s)}.${String(ms).padStart(3,'0')}`;
+}
+function fmtShort(sec) {
+  const m=Math.floor(sec/60), s=Math.floor(sec%60), cs=Math.floor((sec%1)*100);
+  return `${pad(m)}:${pad(s)}.${String(cs).padStart(2,'0')}`;
+}
+function lrcTs(sec) {
+  const m=Math.floor(sec/60), s=Math.floor(sec%60), cs=Math.floor((sec%1)*100);
+  return `${pad(m)}:${pad(s)}.${String(cs).padStart(2,'0')}`;
+}
+function pad(n) { return String(n).padStart(2,'0'); }
+function escXML(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
