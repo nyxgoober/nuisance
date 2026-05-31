@@ -1,68 +1,204 @@
-# Nuisance Lyrics Renderer
-**Nuisance** is a minimalist, precise command-line utility for generating beautifully animated, time-synced lyric video frames from standard subtitle and lyric formats. It features smooth "word-by-word" highlight animations, kinetic vertical scrolling, and subtle focal fading.
-## Features
- * **Word-by-Word Highlight Tracking:** Smoothly transitions individual text segments from inactive to active, and finally to completed states using custom easing functions (ease_out).
- * **Dynamic Vertical Centering:** Automatically computes active line heights and smoothly shifts the canvas coordinate space to keep the active line centered at 40\% of the screen height.
- * **Proximity Fading:** Real-time distance-based alpha scaling dynamically fades lines that are too far above or below the active viewpoint.
- * **LRC to TTML Conversion:** Includes a pre-processor utility (lrc2ttml.py) to flawlessly translate standard Enhanced LRC lyric formats into structurally sound TTML files.
-## Installation & Requirements
-Ensure you have Python 3 installed alongside the required imaging dependency:
-```bash
-pip install pillow
+# Nuisance
 
+**Nuisance** is a general-purpose music renderer that generates beautifully animated video frames as PNG sequences, ready to encode with ffmpeg. It currently ships two renderers:
+
+- **`nuisance.py`** — time-synced lyric videos from TTML files
+- **`midimap.py`** — Synthesia-style falling-note visualisations from MIDI files
+
+All renderers share the same output pipeline: PNG frame sequences → ffmpeg.
+
+---
+
+## Installation
+
+```bash
+pip install pillow mido
 ```
+
+`mido` is only required for `midimap.py`. `nuisance.py` only needs Pillow.
+
 ### Font Requirements
-The renderer is pre-configured to look for specific fonts in the local directory to maintain typographic visual hierarchy:
- * **ZenKakuGothicNew-Bold.ttf** (Used for active, scaling, and bold titles)
- * **ZenKakuGothicNew-Regular.ttf** (Used for idle text and the system watermark)
-> **Note:** If these specific .ttf files are missing, the utility will automatically fall back to standard system default bitmaps without crashing.
-> 
-## Step 1: Convert Lyrics (.lrc to .ttml)
-If your lyrics are in standard timestamped .lrc formatting, convert them first using the parser pipeline.
+
+Both renderers look for these fonts in the working directory:
+
+- **`ZenKakuGothicNew-Bold.ttf`** — active lines, titles, highlights
+- **`ZenKakuGothicNew-Regular.ttf`** — idle lines, romanization, watermark
+
+If the fonts are missing, the renderer falls back to the system default bitmap font without crashing.
+
+---
+
+## nuisance.py — Lyric Video Renderer
+
+### Features
+
+- **Syllable-level wipe** — a left-to-right pixel wipe sweeps across each word as it's sung (requires word-synced TTML)
+- **Line-level fade** — for line-synced TTML, the whole line cross-fades as it becomes active
+- **Kinetic scroll** — the active line is anchored at 40% of screen height; lines above snap to position, lines below use a spring for a lazy catch-up feel; recently-finished lines ease upward in sync with their shrink animation
+- **Proximity fading** — lines far from the active line fade out proportionally
+- **Intermission dots** — gaps ≥ 2.5 seconds between lines show three pulsing dots that slide into the layout and push lines apart rather than overlaying them
+- **Romanization** — a second TTML file can be overlaid below each line simultaneously
+- **Background modes** — opaque dark, transparent RGBA (blurred shadows), or green screen
+
+### Step 1: Get a TTML lyrics file
+
+If you have an `.lrc` file, convert it first:
+
 ```bash
 python lrc2ttml.py lyrics.lrc --output lyrics.ttml
-
 ```
-### Options:
- * --output, -o: Specify a explicit target output file path (defaults to matching the input filename).
- * --title, -t: Set the internal track meta-title directly via CLI to bypass the interactive confirmation script.
-## Step 2: Render Frames
-The primary script (nuisance.py) parses the layout metrics and dumps individual frame sequences as static .png files.
+
+Options:
+- `--output`, `-o` — output path (defaults to input filename with `.ttml`)
+- `--title`, `-t` — set track title without interactive prompt
+
+For word-by-word timing, use the web stamping tool at **https://nuisance.patchednexus.win/** or the included HTML file — upload the line-synced TTML and an audio file, stamp each word, then export.
+
+You can also source `.lrc` files from `syncedlyrics`, LRCLIB, or similar services.
+
+### Step 2: Render
+
 ```bash
-python nuisance.py --input lyrics.ttml --duration 180.5
-
+python nuisance.py --input lyrics.ttml --duration 217
 ```
-### Options:
- * --input: (Required) Path to the target source XML/TTML file structure.
- * --duration: (Required) Explicit timeframe length of the track loop in total float seconds.
- * --start: (Optional) Specifies an arbitrary frame index offset to resume interrupted rendering workflows.
-## Step 3: Encode into Video with FFmpeg
-Once individual frame sequences are fully written out to disk within the local /frames directory environment, compile them alongside your original audio mix file using standard ffmpeg stream copy pipelines:
+
+Options:
+
+| Flag | Required | Description |
+|---|---|---|
+| `--input` | ✓ | Path to TTML file |
+| `--duration` | ✓ | Track length in seconds |
+| `--start` | | Resume from this frame index |
+| `--workers` | | Thread count (default: CPU count) |
+| `--transparent` | | RGBA output with soft blurred shadows |
+| `--greenscreen` | | Solid `#00ff00` background for chroma key |
+| `--romanise` | | Path to a second TTML with romanized lyrics |
+
+`--transparent` and `--greenscreen` are mutually exclusive. `--transparent` is slower; use `--greenscreen` when you just need to composite over a video.
+
+### Step 3: Encode
+
+**Opaque (standard):**
 ```bash
 ffmpeg -framerate 60 -i frames/frame_%06d.png -i audio.mp3 \
-       -c:v h264_mediacodec -c:a aac -b:a 192k -shortest out.mp4
+       -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
+```
+
+**Transparent (ProRes 4444 with alpha):**
+```bash
+ffmpeg -framerate 60 -i frames/frame_%06d.png \
+       -c:v prores_ks -pix_fmt yuva444p10le -profile:v 4444 out.mov
+```
+
+**Transparent composited over a background video:**
+```bash
+ffmpeg -i background.mp4 -framerate 60 -i frames/frame_%06d.png \
+       -i audio.mp3 -filter_complex "[0:v][1:v]overlay=0:0" \
+       -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
+```
+
+**Green screen encode + composite:**
+```bash
+# Encode
+ffmpeg -framerate 60 -i frames/frame_%06d.png \
+       -c:v libx264 -pix_fmt yuv420p -crf 0 out_gs.mp4
+
+# Composite over background
+ffmpeg -i background.mp4 -i out_gs.mp4 \
+       -filter_complex "[1:v]colorkey=0x00ff00:0.3:0.1[ov];[0:v][ov]overlay" \
+       -i audio.mp3 -c:a aac -b:a 192k -shortest out.mp4
+```
+
+> On Android/Termux or hardware-accelerated systems, swap `-c:v libx264` for `-c:v h264_mediacodec`.
+
+### Tunable Constants
+
+Edit these at the top of `nuisance.py`:
+
+| Constant | Default | Purpose |
+|---|---|---|
+| `WIDTH` / `HEIGHT` | 1920 / 1080 | Canvas size |
+| `FPS` | 60 | Frame rate |
+| `SIZE_IDLE` | 36 | Font size for inactive lines |
+| `SIZE_ACTIVE` | 96 | Font size for the active line |
+| `WORD_FADE_DUR` | 0.18 | Duration of line-level fade (seconds) |
+| `LOOKAHEAD` (scroll) | — | Controlled by spring constants `TAU_BELOW`, `TAU_PAST` |
+| `BREAK_THRESHOLD` | 2.5 | Minimum silence gap (seconds) to show intermission dots |
+| `DOT_PULSE_PERIOD` | 1.40 | Seconds for the dot pulse to travel across all three dots |
+
+---
+
+## midimap.py — MIDI Visualiser
+
+Renders a Synthesia-style falling-note view with a piano keyboard at the bottom. Each MIDI track gets its own colour from a built-in palette.
+
+### Features
+
+- **Falling note blocks** — notes scroll down and hit the keyboard exactly on time; block height reflects note duration
+- **Per-track colours** — up to 8 tracks with distinct colours; track names and coloured dots shown in the top-left
+- **Key flash** — white and black keys light up to their track colour on hit with a fast ease-out flash
+- **Glow** — active notes emit a blurred glow at the keyboard surface
+- **Auto pitch range** — the keyboard is sized to fit only the notes actually used in the file
+- **Tempo map support** — handles mid-song tempo changes correctly
+- **Same output modes** as nuisance.py: opaque, transparent, green screen
+
+### Render
+
+```bash
+python midimap.py --input song.mid
+```
+
+Options:
+
+| Flag | Required | Description |
+|---|---|---|
+| `--input` | ✓ | Path to `.mid` or `.midi` file |
+| `--duration` | | Override duration (auto-detected if omitted) |
+| `--start` | | Resume from this frame index |
+| `--workers` | | Thread count (default: CPU count) |
+| `--lookahead` | | Seconds of notes visible above keyboard (default: 3.0) |
+| `--transparent` | | RGBA output with blurred shadows |
+| `--greenscreen` | | Solid `#00ff00` background for chroma key |
+| `--title` | | Override the title shown on screen |
+
+### Encode
+
+Same ffmpeg commands as nuisance.py above. Since midimap has no audio, always provide `-i audio.mp3` (or your source audio) separately.
+
+```bash
+ffmpeg -framerate 60 -i frames/frame_%06d.png -i audio.mp3 \
+       -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
+```
+
+### Tunable Constants
+
+Edit these at the top of `midimap.py`:
+
+| Constant | Default | Purpose |
+|---|---|---|
+| `WIDTH` / `HEIGHT` | 1920 / 1080 | Canvas size |
+| `FPS` | 60 | Frame rate |
+| `LOOKAHEAD` | 3.0 | Seconds of notes visible above keyboard |
+| `KEY_AREA_H` | 180 | Pixel height of the keyboard strip |
+| `NOTE_RADIUS` | 6 | Rounded corner radius on note blocks |
+| `GLOW_BLUR` | 18 | Gaussian blur radius for hit glow |
+| `TRACK_PALETTE` | 8 colours | Per-track colour list — edit to taste |
+
+---
+
+## File Layout
 
 ```
-### Command Flags Breakdown:
- * -framerate 60: Dictates matching timeline frequency interpolation corresponding to the source canvas capture variables.
- * -i frames/frame_%06d.png: Feeds sequentially indexed source file matrices into the visual layout buffer engine.
- * -i audio.mp3: Merges the master audio track accompaniment file stream.
- * -c:v h264_mediacodec: Instructs hardware-accelerated video processing options (swap for -c:v libx264 if rendering on traditional CPU architectures).
- * -shortest: Limits final video timeline bounds strictly to whichever media asset terminates first to ensure structural synchronization.
-## Design Constants Reference
-For custom adjustments, the following layout constants can be tuned directly in the header of nuisance.py:
-| Constant Name | Value | Purpose |
-|---|---|---|
-| WIDTH / HEIGHT | 1920 / 1080 | Canvas dimension metrics |
-| FPS | 60 | Targeting baseline timeline processing targets |
-| SIZE_IDLE | 36 | Text scaling size during dormant cycles |
-| SIZE_ACTIVE | 96 | Dynamic text footprint when element receives active tracking focus |
-| WORD_FADE_DUR | 0.18 | Interpolation timeframe curve length for alpha color transitions |
-### Word-for-Word Lyrics
-To get word-for-word lyrics syncing, first get a line-by-line TTML.
-After that, use the included HTML, upload the TTML, the same music file you used, and start stamping words from what you hear.
-After finishing stamping, press the export button, download/copy the TTML and pass it inside the input flag. Nuisance will automatically detect that it is a line-by-line TTML.
+nuisance/
+├── nuisance.py       # lyric video renderer
+├── midimap.py        # MIDI falling-note renderer
+├── lrc2ttml.py       # LRC → TTML converter
+├── README.md
+├── ZenKakuGothicNew-Bold.ttf
+├── ZenKakuGothicNew-Regular.ttf
+└── frames/           # rendered PNGs go here (auto-created)
+```
 
-If you do not wish to use the HTML, you can also use https://nuisance.patchednexus.win/ .
-### Lyric File Sources
-You can obtain lyric files from other sources if you prefer to avoid manually creating one from sources such as Python syncedlyrics, LRCLIB or any other source, then use the provided lrc2ttml.py to convert it to a TTML.
+---
+
+***Thank you for using Nuisance!***
