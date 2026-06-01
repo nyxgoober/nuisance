@@ -567,7 +567,7 @@ def draw_dots(img, draw, cy, brk, t, transparent, greenscreen):
     # travelling peak: position 0→DOT_COUNT cycles over DOT_PULSE_PERIOD
     peak_pos = (elapsed % DOT_PULSE_PERIOD) / DOT_PULSE_PERIOD * DOT_COUNT
 
-    cx_start = MARGIN_LEFT
+    cx_start = MARGIN_LEFT + 18
 
     for d in range(DOT_COUNT):
         # distance of this dot from the travelling peak (wrap around)
@@ -635,7 +635,7 @@ def render_frame(phrases, roman_lines, title, frame_num,
 
         # ── dot slot ─────────────────────────────────────────────────
         if slot["type"] == "dots":
-            cy = y + h * 0.30
+            cy = y + h * 0.18
             draw_dots(img, draw, cy, brk, t, transparent, greenscreen)
             continue
 
@@ -795,19 +795,46 @@ def on_frame_done(total):
 def main():
     global _done_count
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input",        required=True)
-    parser.add_argument("--duration",     type=float, required=True)
-    parser.add_argument("--start",        type=int,   default=0)
-    parser.add_argument("--workers",      type=int,   default=os.cpu_count())
+    parser = argparse.ArgumentParser(
+        prog="nuisance.py",
+        description="Nuisance — time-synced lyric video renderer. Outputs PNG frame sequences ready for ffmpeg.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # quick preview (renders only 1 frame per second, skips render prompt)
+  python nuisance.py --input lyrics.ttml --duration 217 --preview
+
+  # full render, opaque
+  python nuisance.py --input lyrics.ttml --duration 217
+
+  # transparent RGBA (for compositing)
+  python nuisance.py --input lyrics.ttml --duration 217 --transparent
+
+  # green screen + romanization
+  python nuisance.py --input lyrics.ttml --duration 217 --greenscreen --romanise roman.ttml
+
+encode output:
+  ffmpeg -framerate 60 -i frames/frame_%06d.png -i audio.mp3 \\\\
+         -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
+        """
+    )
+    parser.add_argument("--input",        required=True,
+                        help="Path to TTML lyrics file")
+    parser.add_argument("--duration",     type=float, required=True,
+                        help="Track length in seconds")
+    parser.add_argument("--start",        type=int,   default=0,
+                        help="Resume from this frame index (default: 0)")
+    parser.add_argument("--workers",      type=int,   default=os.cpu_count(),
+                        help="Thread count for parallel rendering (default: CPU count)")
     parser.add_argument("--transparent",  action="store_true",
-                        help="Export RGBA PNGs with blurred text shadows (slower)")
+                        help="Export RGBA PNGs with blurred text shadows (slower, for alpha compositing)")
     parser.add_argument("--greenscreen",  action="store_true",
                         help="Solid green (#00ff00) background for chroma key (fast)")
     parser.add_argument("--romanise",     default=None,
-                        help="Path to romanized lyrics TTML")
+                        help="Path to a second TTML file with romanized lyrics (shown below each line)")
+    parser.add_argument("--preview",      action="store_true",
+                        help="Render 1 frame per second only — fast visual check, skips confirmation prompt")
     args = parser.parse_args()
-
     if args.transparent and args.greenscreen:
         print("  error: --transparent and --greenscreen are mutually exclusive.")
         return
@@ -831,18 +858,25 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     total = int(args.duration * FPS)
-    print(f"  {total} frames @ {FPS}fps · {args.workers} workers")
+
+    if args.preview:
+        frames = list(range(args.start, total, FPS))
+        print(f"  PREVIEW MODE — {len(frames)} frames (1/sec) · {args.workers} workers")
+    else:
+        frames = list(range(args.start, total))
+        print(f"  {total} frames @ {FPS}fps · {args.workers} workers")
+
     print(f"  output → {OUTPUT_DIR}/\n")
 
-    if input("  Render? (y/n): ").lower() != "y":
-        return
+    if not args.preview:
+        if input("  Render? (y/n): ").lower() != "y":
+            return
 
     print("  Pre-computing scroll offsets …", end="", flush=True)
     offsets = precompute_offsets(phrases, breaks, total)
     print(" done.")
 
     _done_count = 0
-    frames = range(args.start, total)
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {

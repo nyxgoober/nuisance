@@ -629,23 +629,44 @@ def main():
     global _done_count
 
     parser = argparse.ArgumentParser(
-        description="Synthesia-style MIDI visualiser — outputs PNG frame sequences")
+        prog="midimap.py",
+        description="Nuisance — Synthesia-style MIDI visualiser. Outputs PNG frame sequences ready for ffmpeg.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # quick preview (1 frame/sec, skips confirmation)
+  python midimap.py --input song.mid --preview
+
+  # full render
+  python midimap.py --input song.mid
+
+  # transparent with custom lookahead
+  python midimap.py --input song.mid --transparent --lookahead 4.0
+
+encode output:
+  ffmpeg -framerate 60 -i frames/frame_%06d.png -i audio.mp3 \\
+         -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
+        """
+    )
     parser.add_argument("--input",       required=True,
                         help="Path to .mid / .midi file")
     parser.add_argument("--duration",    type=float, default=None,
                         help="Override duration in seconds (auto-detected if omitted)")
     parser.add_argument("--start",       type=int,   default=0,
-                        help="Start from this frame index (resume)")
-    parser.add_argument("--workers",     type=int,   default=os.cpu_count())
+                        help="Resume from this frame index (default: 0)")
+    parser.add_argument("--workers",     type=int,   default=os.cpu_count(),
+                        help="Thread count for parallel rendering (default: CPU count)")
     global LOOKAHEAD
     parser.add_argument("--lookahead",   type=float, default=LOOKAHEAD,
                         help=f"Seconds of notes visible above keyboard (default {LOOKAHEAD})")
     parser.add_argument("--transparent", action="store_true",
-                        help="RGBA output with blurred shadows")
+                        help="RGBA output with blurred shadows (slower, for alpha compositing)")
     parser.add_argument("--greenscreen", action="store_true",
-                        help="Solid green background for chroma key")
+                        help="Solid green (#00ff00) background for chroma key (fast)")
     parser.add_argument("--title",       default=None,
                         help="Override title shown on screen")
+    parser.add_argument("--preview",     action="store_true",
+                        help="Render 1 frame per second only — fast visual check, skips confirmation prompt")
     args = parser.parse_args()
 
     if args.transparent and args.greenscreen:
@@ -679,14 +700,21 @@ def main():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     total = int(duration * FPS)
-    print(f"  {total} frames @ {FPS}fps · {args.workers} workers")
+
+    if args.preview:
+        frames = list(range(args.start, total, FPS))
+        print(f"  PREVIEW MODE — {len(frames)} frames (1/sec) · {args.workers} workers")
+    else:
+        frames = list(range(args.start, total))
+        print(f"  {total} frames @ {FPS}fps · {args.workers} workers")
+
     print(f"  output → {OUTPUT_DIR}/\n")
 
-    if input("  Render? (y/n): ").lower() != "y":
-        return
+    if not args.preview:
+        if input("  Render? (y/n): ").lower() != "y":
+            return
 
     _done_count = 0
-    frames = range(args.start, total)
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {

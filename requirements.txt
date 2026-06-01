@@ -1,2 +1,4 @@
 pillow
 mido
+soundfile
+pydub
