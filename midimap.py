@@ -44,7 +44,7 @@ MIDI_HIGH    = 108   # C8
 # Note block visual
 NOTE_RADIUS  = 6     # rounded corner radius
 NOTE_MIN_H   = 8     # minimum block height in pixels
-NOTE_GAP     = 2     # gap between stacked notes on same key
+NOTE_GAP     = 4     # gap between stacked notes on same key
 GLOW_BLUR    = 18    # gaussian blur radius for hit glow
 GLOW_ALPHA   = 160   # max glow opacity (0–255)
 
@@ -391,6 +391,11 @@ def render_frame(tracks_indexed, track_colors, track_names,
             draw.line([(0, y), (WIDTH, y)], fill=(r, g, b))
             draw.line([(0, y+1), (WIDTH, y+1)], fill=(r, g, b))
 
+    # ── scanline grid overlay (subtle, helps depth perception) ──────────
+    if not transparent and not greenscreen:
+        for y in range(0, key_top, 60):
+            draw.line([(0, y), (WIDTH, y)], fill=(20, 20, 28))
+
     # ── collect active pitches per track for keyboard highlighting ─────
     active = {}   # pitch -> (color, velocity, how long held in seconds)
     for ti, indexed in enumerate(tracks_indexed):
@@ -559,11 +564,6 @@ def render_frame(tracks_indexed, track_colors, track_names,
         base_rgba.alpha_composite(glow_blurred)
         img = base_rgba.convert("RGB") if not transparent else base_rgba
         draw = ImageDraw.Draw(img)   # refresh draw handle after paste
-
-    # ── scanline grid overlay (subtle, helps depth perception) ────────
-    if not transparent and not greenscreen:
-        for y in range(0, key_top, 60):
-            draw.line([(0, y), (WIDTH, y)], fill=(255, 255, 255, 8) if transparent else (20, 20, 28))
 
     # ── title ─────────────────────────────────────────────────────────
     if title:

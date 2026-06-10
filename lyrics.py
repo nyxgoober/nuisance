@@ -135,22 +135,46 @@ def load_ttml(path):
 # ══════════════════════════════════════════
 
 def load_roman_ttml(path):
+    """
+    Returns a dict mapping phrase begin-time → list of syllable dicts
+    [{text, begin, end}, ...].  Falls back to a single-syllable list
+    spanning the whole phrase if no <span> children are present.
+    """
     tree = ET.parse(path)
     root = tree.getroot()
     ns   = {"tt": "http://www.w3.org/ns/ttml"}
     entries = {}
     for p in root.findall(".//tt:p", ns):
-        begin = parse_time(p.attrib["begin"])
-        text  = "".join(p.itertext()).strip()
-        if text:
-            entries[begin] = text
+        p_begin = parse_time(p.attrib["begin"])
+        p_end   = parse_time(p.attrib["end"])
+        spans   = p.findall("tt:span", ns)
+        if spans:
+            syls = []
+            for s in spans:
+                text = (s.text or "").strip()
+                if text:
+                    syls.append({
+                        "text":  text,
+                        "begin": parse_time(s.attrib.get("begin", p.attrib["begin"])),
+                        "end":   parse_time(s.attrib.get("end",   p.attrib["end"])),
+                    })
+            if syls:
+                entries[p_begin] = syls
+        else:
+            text = "".join(p.itertext()).strip()
+            if text:
+                entries[p_begin] = [{"text": text, "begin": p_begin, "end": p_end}]
     return entries
 
 def align_romanization(phrases, roman_entries):
+    """
+    Returns list[list[syl]] — one syllable list per phrase.
+    Each syl is {text, begin, end}.  Empty list means no romanization.
+    """
     result = []
     keys   = sorted(roman_entries.keys())
     for p in phrases:
-        best = ""
+        best = []
         for k in keys:
             if abs(k - p["begin"]) < 0.05:
                 best = roman_entries[k]
@@ -658,7 +682,7 @@ def render_frame(phrases, roman_lines, title, frame_num,
         use_bold  = state == 'active' or shrinking
         fnt       = get_font(FONT_BOLD if use_bold else FONT_REGULAR, fs)
 
-        roman = roman_lines[i] if roman_lines else ""
+        roman_syls = roman_lines[i] if roman_lines else []
 
         if state == 'active':
             fs_actual, fnt, needs_wrap = fit_font_size(p["syllables"], FONT_BOLD, fs, draw)
@@ -708,14 +732,39 @@ def render_frame(phrases, roman_lines, title, frame_num,
                     x += sw
                 row_y += line_h + 8
 
-            if roman:
+            if roman_syls:
                 roman_fs  = max(18, int(fs_actual * SIZE_ROMAN_SCALE))
-                roman_fnt = get_font(FONT_REGULAR, roman_fs)
-                roman_y   = row_y + 4
-                draw_text(img, draw, (MARGIN_LEFT, int(roman_y)), roman, roman_fnt,
-                          ROMAN_COLOR, alpha,
-                          transparent=transparent, greenscreen=greenscreen,
-                          shadow_blur=4, shadow_offset=2)
+                roman_fnt = get_font(FONT_BOLD, roman_fs)
+                roman_y   = row_y + 14
+                rx        = float(MARGIN_LEFT + 6)
+                roman_str = "".join(s["text"] for s in roman_syls)
+                if is_syllable_synced:
+                    for rsyl in roman_syls:
+                        rtext = rsyl["text"]
+                        rbb   = draw.textbbox((0, 0), rtext, font=roman_fnt)
+                        rsw   = rbb[2] - rbb[0]
+                        rb, re = rsyl["begin"], rsyl["end"]
+                        if t < rb:
+                            wipe_frac = 0.0
+                        elif t <= re:
+                            wipe_frac = (t - rb) / max(re - rb, 0.01)
+                        else:
+                            wipe_frac = 1.0
+                        if transparent:
+                            draw_wipe_transparent(img, (rx, roman_y), rtext, roman_fnt,
+                                                  ROMAN_COLOR, (255, 255, 255),
+                                                  wipe_frac, alpha)
+                        else:
+                            draw_wipe_opaque(img, draw, (rx, roman_y), rtext, roman_fnt,
+                                             ROMAN_COLOR, (255, 255, 255),
+                                             wipe_frac, alpha)
+                        rx += rsw
+                else:
+                    # line-by-line — no fake wipe, just draw sung colour
+                    draw_text(img, draw, (rx, roman_y), roman_str, roman_fnt,
+                              ACTIVE_SUNG, alpha,
+                              transparent=transparent, greenscreen=greenscreen,
+                              shadow_blur=4, shadow_offset=2)
 
         else:
             ref       = draw.textbbox((0, 0), "あ", font=fnt)
@@ -731,11 +780,12 @@ def render_frame(phrases, roman_lines, title, frame_num,
             draw_text(img, draw, (MARGIN_LEFT, int(draw_y)), full, fnt, base, alpha,
                       transparent=transparent, greenscreen=greenscreen)
 
-            if roman:
+            if roman_syls:
                 roman_fnt = get_font(FONT_REGULAR, SIZE_ROMAN_IDLE)
-                roman_y   = draw_y + glyph_h + 2
+                roman_y   = draw_y + glyph_h + 8
                 roman_col = IDLE_COLOR if state == 'idle' else DONE_COLOR
-                draw_text(img, draw, (MARGIN_LEFT, int(roman_y)), roman, roman_fnt,
+                roman_str = "".join(s["text"] for s in roman_syls)
+                draw_text(img, draw, (MARGIN_LEFT + 6, int(roman_y)), roman_str, roman_fnt,
                           roman_col, alpha * 0.75,
                           transparent=transparent, greenscreen=greenscreen,
                           shadow_blur=3, shadow_offset=2)
@@ -845,7 +895,7 @@ encode output:
     if args.romanise:
         roman_entries = load_roman_ttml(args.romanise)
         roman_lines   = align_romanization(phrases, roman_entries)
-        print(f"  romanization: {sum(1 for r in roman_lines if r)} / {len(roman_lines)} lines matched")
+        print(f"  romanization: {sum(1 for r in roman_lines if r)} / {len(roman_lines)} lines matched"  )
 
     breaks = detect_breaks(phrases, args.duration)
 
@@ -924,4 +974,5 @@ encode output:
 
 if __name__ == "__main__":
     main()
+
 
