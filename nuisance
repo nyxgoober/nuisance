@@ -233,8 +233,8 @@ def wizard():
     if preview:
         forward.append("--preview")
 
-    workers = _prompt("worker threads", default=str(os.cpu_count()))
-    if workers != str(os.cpu_count()):
+    workers = _prompt("worker threads", default=str(os.cpu_count() or 1))
+    if workers != str(os.cpu_count() or 1):
         forward += ["--workers", workers]
 
     print()

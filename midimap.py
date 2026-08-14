@@ -654,7 +654,7 @@ encode output:
                         help="Override duration in seconds (auto-detected if omitted)")
     parser.add_argument("--start",       type=int,   default=0,
                         help="Resume from this frame index (default: 0)")
-    parser.add_argument("--workers",     type=int,   default=os.cpu_count(),
+    parser.add_argument("--workers",     type=int,   default=os.cpu_count() or 1,
                         help="Thread count for parallel rendering (default: CPU count)")
     global LOOKAHEAD
     parser.add_argument("--lookahead",   type=float, default=LOOKAHEAD,

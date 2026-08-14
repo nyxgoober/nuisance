@@ -530,7 +530,7 @@ encode output:
                         help=f"Number of frequency bars in spectrum mode (default: {SPEC_BARS})")
     parser.add_argument("--start",       type=int, default=0,
                         help="Resume from this frame index (default: 0)")
-    parser.add_argument("--workers",     type=int, default=os.cpu_count(),
+    parser.add_argument("--workers",     type=int, default=os.cpu_count() or 1,
                         help="Thread count for parallel rendering (default: CPU count)")
     parser.add_argument("--transparent", action="store_true",
                         help="RGBA output with blurred shadows (slower, for alpha compositing)")
