@@ -44,6 +44,9 @@ const ROMAN_COLOR: Color = [160, 160, 175];
 
 const GROW_IN_DUR: f64 = 0.25;
 const GROW_OUT_DUR: f64 = 0.30;
+/// Cap the grow-in so the active line never reaches full active_h.
+/// Gives every out-animation the gentle "interrupted" feel.
+const GROW_PEAK_CAP: f64 = 0.75;
 const WORD_FADE_DUR: f64 = 0.18;
 
 const BREAK_THRESHOLD: f64 = 2.5;
@@ -742,17 +745,18 @@ fn phrase_visual_state(
     t: f64,
 ) -> (PhraseState, f64, u32, bool) {
     if is_currently_active && (i as isize) == last_started_idx {
-        let grow_t = ease_out(clamp((t - p.begin) / GROW_IN_DUR, 0.0, 1.0));
+        // Cap grow-in at GROW_PEAK_CAP so every line uses the gentle
+        // "interrupted" style animation (never reaches full active_h).
+        let grow_t = ease_out(clamp((t - p.begin) / GROW_IN_DUR, 0.0, 1.0)) * GROW_PEAK_CAP;
         let h = lerp(p.idle_h, p.active_h, grow_t);
         let fs = lerp(p.idle_fs as f64, SIZE_ACTIVE as f64, grow_t) as u32;
         return (PhraseState::Active, h, fs, false);
     }
     if (i as isize) <= last_started_idx {
-        // How far the grow-in had actually reached when this phrase stopped being active.
-        // If the phrase was active for less than GROW_IN_DUR, the grow-in was interrupted
-        // and we must shrink from the interrupted height, not the full active_h.
+        // Peak is capped whether the grow-in was interrupted or completed.
         let grow_dur = p.active_end - p.begin;
-        let peak_t = ease_out(clamp(grow_dur / GROW_IN_DUR, 0.0, 1.0));
+        let raw_t = ease_out(clamp(grow_dur / GROW_IN_DUR, 0.0, 1.0));
+        let peak_t = raw_t * GROW_PEAK_CAP;
         let peak_h = lerp(p.idle_h, p.active_h, peak_t);
         let peak_fs = lerp(p.idle_fs as f64, SIZE_ACTIVE as f64, peak_t);
 
