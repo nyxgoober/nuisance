@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import re
+import subprocess
 import sys
 
 
 # ══════════════════════════════════════════
 # FILE TYPE DETECTION
 # ══════════════════════════════════════════
+
+_LRC_TS_LINE_RE = re.compile(r"^\s*\[\d+:\d+(?:[.:]\d+){0,2}\]")
+_LRC_META_RE    = re.compile(r"^\s*\[(?:ti|ar|al|au|length|by|offset|re|ve):", re.IGNORECASE)
+_ELRC_WORD_RE   = re.compile(r"<\d+:\d+(?:[.:]\d+){0,2}>")
+
 
 def _read_bytes(path, n):
     try:
@@ -15,54 +22,90 @@ def _read_bytes(path, n):
     except OSError:
         return b""
 
-def _read_text(path, n=2048):
-    try:
-        with open(path, "rb") as f:
-            return f.read(n).decode("utf-8", errors="replace")
-    except OSError:
+
+def _read_text(path, n=8192):
+    raw = _read_bytes(path, n)
+    if not raw:
         return ""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16", errors="replace")
+    for enc in ("utf-8-sig", "cp932", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _is_mpeg_or_adts(header):
+    """Validate MPEG audio or ADTS AAC sync header while excluding UTF-16 BOMs."""
+    if len(header) < 4:
+        return False
+    if header[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        # Check if odd/even bytes look like UTF-16 ASCII text (null bytes)
+        if header[2] == 0x00 or header[3] == 0x00:
+            return False
+    if header[0] != 0xFF or (header[1] & 0xE0) != 0xE0:
+        return False
+    # ADTS AAC: syncword 0xFFF, layer == 00
+    if (header[1] & 0xF6) == 0xF0:
+        return True
+    # MPEG Layer I/II/III: version != 01 (reserved), layer != 00, bitrate != 1111/0000, sr != 11
+    version_bits = (header[1] >> 3) & 0x03
+    layer_bits   = (header[1] >> 1) & 0x03
+    bitrate_bits = (header[2] >> 4) & 0x0F
+    sr_bits      = (header[2] >> 2) & 0x03
+    return (
+        version_bits != 0x01
+        and layer_bits != 0x00
+        and bitrate_bits not in (0x00, 0x0F)
+        and sr_bits != 0x03
+    )
+
 
 def detect_type(path):
     header = _read_bytes(path, 16)
+    if not header:
+        return "unknown"
 
     if header[:4] == b"MThd":
         return "midi"
 
-    if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+    if len(header) >= 12 and header[:4] in (b"RIFF", b"RF64") and header[8:12] == b"WAVE":
         return "audio"
     if header[:4] == b"fLaC":
         return "audio"
     if header[:4] == b"OggS":
         return "audio"
-    if header[:4] == b"FORM" and header[8:12] in (b"AIFF", b"AIFC"):
+    if len(header) >= 12 and header[:4] == b"FORM" and header[8:12] in (b"AIFF", b"AIFC"):
         return "audio"
     if header[:3] == b"ID3":
         return "audio"
-    if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
-        return "audio"
     if len(header) >= 8 and header[4:8] in (b"ftyp", b"moov"):
         return "audio"
-    if header[:4] == b"WAVE":
+    if _is_mpeg_or_adts(header):
         return "audio"
 
-    text = _read_text(path, 4096)
-    text_lower = text.lower().lstrip()
-    if text_lower.startswith("\ufeff"):
-        text_lower = text_lower[1:]
+    text = _read_text(path, 8192)
+    text_clean = text.lstrip("\ufeff").lstrip()
+    text_lower = text_clean.lower()
 
-    if text_lower.startswith("<?xml"):
-        if any(tok in text_lower for tok in (
-            "http://www.w3.org/ns/ttml", "<tt ", "<tt\n", "<tt>", "ttml",
-        )):
+    if text_lower.startswith("<?xml") or text_lower.startswith("<tt"):
+        if any(
+            tok in text_lower
+            for tok in ("http://www.w3.org/ns/ttml", "<tt ", "<tt\n", "<tt\r", "<tt\t", "<tt>")
+        ):
             return "ttml"
+
+    if any(tok in text_lower for tok in ("<tt ", "<tt>", "http://www.w3.org/ns/ttml")):
         return "ttml"
 
-    if "<tt " in text_lower or "<tt>" in text_lower:
-        return "ttml"
-
-    lines = text.splitlines()
-    lrc_lines = sum(1 for l in lines[:20] if l.strip().startswith("["))
-    if lrc_lines >= 2:
+    lines = text_clean.splitlines()[:50]
+    ts_hits   = sum(1 for ln in lines if _LRC_TS_LINE_RE.match(ln))
+    meta_hits = sum(1 for ln in lines if _LRC_META_RE.match(ln))
+    if ts_hits >= 1 or meta_hits >= 2:
+        if _ELRC_WORD_RE.search(text_clean):
+            return "elrc"
         return "lrc"
 
     return "unknown"
@@ -74,6 +117,8 @@ def _ext_fallback(path):
         return "midi"
     if ext in (".ttml", ".xml"):
         return "ttml"
+    if ext in (".elrc",):
+        return "elrc"
     if ext in (".lrc",):
         return "lrc"
     if ext in (".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif", ".m4a", ".aac", ".opus"):
@@ -94,7 +139,7 @@ def identify(path):
 
 def _prompt(label, default=None, required=True):
     """Print a prompt and return stripped input. Returns default on empty."""
-    hint = f"  [{default}]" if default is not None else ""
+    hint = f"  [{default}]" if default is not None and default != "" else ""
     while True:
         try:
             val = input(f"  {label}{hint}: ").strip()
@@ -110,6 +155,34 @@ def _prompt(label, default=None, required=True):
         print("    (required)")
 
 
+def _prompt_float(label, default="", required=False, positive=True):
+    while True:
+        raw = _prompt(label, default=default, required=required)
+        if raw == "":
+            return ""
+        try:
+            v = float(raw)
+            if positive and v <= 0:
+                print("    (must be > 0)")
+                continue
+            return raw
+        except ValueError:
+            print("    (enter a valid number)")
+
+
+def _prompt_int(label, default=None, minimum=1):
+    while True:
+        raw = _prompt(label, default=default)
+        try:
+            v = int(raw)
+            if v < minimum:
+                print(f"    (must be >= {minimum})")
+                continue
+            return str(v)
+        except ValueError:
+            print("    (enter an integer)")
+
+
 def _prompt_choice(label, choices, default=None):
     """Prompt with numbered choices. Returns the chosen string."""
     print(f"  {label}")
@@ -118,7 +191,6 @@ def _prompt_choice(label, choices, default=None):
         print(f"    {i}) {c}{marker}")
     while True:
         raw = _prompt("choice", default=default)
-        # accept number or value directly
         if raw.isdigit():
             idx = int(raw) - 1
             if 0 <= idx < len(choices):
@@ -130,7 +202,7 @@ def _prompt_choice(label, choices, default=None):
 
 def _prompt_bool(label, default=False):
     hint = "Y/n" if default else "y/N"
-    raw = _prompt(f"{label} ({hint})", default="").lower()
+    raw = _prompt(f"{label} ({hint})", default="", required=False).lower()
     if not raw:
         return default
     return raw.startswith("y")
@@ -147,48 +219,53 @@ def wizard():
     # ── input file ───────────────────────────────────────────────────────
     while True:
         path = _prompt("input file")
-        if os.path.exists(path):
+        if os.path.isfile(path):
             break
         print(f"    file not found: {path}")
 
     kind = identify(path)
     KIND_LABEL = {
         "ttml":  "TTML lyrics",
+        "lrc":   "LRC lyrics",
+        "elrc":  "Enhanced LRC lyrics",
         "midi":  "MIDI file",
         "audio": "audio file",
     }
     print(f"    detected: {KIND_LABEL.get(kind, kind)}")
     print()
 
-    if kind == "lrc":
-        print(
-            "  LRC files must be converted to TTML first:\n"
-            f"    python lrc2ttml.py {path} --output lyrics.ttml\n"
-            "  Then re-run with the .ttml file."
-        )
-        sys.exit(1)
-
     if kind == "unknown":
         print(
             f"  Could not identify '{path}' from content or extension.\n"
-            "  Supported: TTML (.ttml/.xml), MIDI (.mid/.midi), "
-            "audio (wav/flac/ogg/mp3/aiff/m4a)."
+            "  Supported: TTML (.ttml/.xml), LRC / Enhanced LRC (.lrc), "
+            "MIDI (.mid/.midi), audio (wav/flac/ogg/mp3/aiff/m4a/aac/opus)."
         )
         sys.exit(1)
 
     forward = ["--input", path]
 
     # ── type-specific questions ───────────────────────────────────────────
-    if kind == "ttml":
-        dur = _prompt("duration (seconds)")
-        forward += ["--duration", dur]
+    if kind in ("ttml", "lrc", "elrc"):
+        dur = _prompt_float("duration (seconds, blank = auto-detect)", default="", required=False)
+        if dur:
+            forward += ["--duration", dur]
 
-        romanise = _prompt("romanisation TTML (leave blank to skip)", default="", required=False)
+        title = _prompt("title override (blank = from file)", default="", required=False)
+        if title:
+            forward += ["--title", title]
+
+        while True:
+            romanise = _prompt(
+                "romanisation TTML/LRC (leave blank to skip)", default="", required=False
+            )
+            if not romanise or os.path.isfile(romanise):
+                break
+            print(f"    file not found: {romanise}")
         if romanise:
             forward += ["--romanise", romanise]
 
     elif kind == "midi":
-        dur = _prompt("duration (seconds, blank = auto-detect)", default="", required=False)
+        dur = _prompt_float("duration (seconds, blank = auto-detect)", default="", required=False)
         if dur:
             forward += ["--duration", dur]
 
@@ -196,7 +273,9 @@ def wizard():
         if title:
             forward += ["--title", title]
 
-        lookahead = _prompt("lookahead seconds (notes visible above keyboard)", default="3.0")
+        lookahead = _prompt_float(
+            "lookahead seconds (notes visible above keyboard)", default="3.0", required=True
+        )
         if lookahead != "3.0":
             forward += ["--lookahead", lookahead]
 
@@ -205,11 +284,11 @@ def wizard():
         forward += ["--mode", mode]
 
         if mode == "spectrum":
-            bars = _prompt("number of frequency bars", default="64")
+            bars = _prompt_int("number of frequency bars", default="64", minimum=1)
             if bars != "64":
                 forward += ["--bars", bars]
 
-        dur = _prompt("duration (seconds, blank = auto-detect)", default="", required=False)
+        dur = _prompt_float("duration (seconds, blank = auto-detect)", default="", required=False)
         if dur:
             forward += ["--duration", dur]
 
@@ -233,8 +312,9 @@ def wizard():
     if preview:
         forward.append("--preview")
 
-    workers = _prompt("worker threads", default=str(os.cpu_count() or 1))
-    if workers != str(os.cpu_count() or 1):
+    default_workers = str(os.cpu_count() or 1)
+    workers = _prompt_int("worker threads", default=default_workers, minimum=1)
+    if workers != default_workers:
         forward += ["--workers", workers]
 
     print()
@@ -253,6 +333,8 @@ def _script_path(name):
 def dispatch(kind, raw_args):
     scripts = {
         "ttml":  "lyrics.py",
+        "lrc":   "lyrics.py",
+        "elrc":  "lyrics.py",
         "midi":  "midimap.py",
         "audio": "waveform.py",
     }
@@ -270,11 +352,9 @@ def dispatch(kind, raw_args):
 # ══════════════════════════════════════════
 
 def main():
-    # If run with no arguments (or just --help), decide what to do
     no_flags = len(sys.argv) == 1
 
     if no_flags:
-        # Interactive wizard
         _, kind, forward = wizard()
     else:
         parser = argparse.ArgumentParser(
@@ -284,59 +364,55 @@ def main():
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog="""
 renderers:
-  lyrics.py   TTML/XML lyrics → lyric video (syllable wipe, kinetic scroll)
-  midimap.py    MIDI files      → Synthesia-style falling-note visualiser
-  waveform.py   Audio files     → scrolling waveform or frequency spectrum bars
+  lyrics.py     TTML / LRC / Enhanced LRC → lyric video (syllable wipe, kinetic scroll)
+  midimap.py    MIDI files                → Synthesia-style falling-note visualiser
+  waveform.py   Audio files               → scrolling waveform or frequency spectrum bars
 
 detection order:
-  1. File content (magic bytes / XML structure)  — reliable for all types
-  2. File extension                               — fallback if content is ambiguous
+  1. File content (magic bytes / XML structure / LRC heuristics)
+  2. File extension fallback
 
 examples:
   python nuisance --input lyrics.ttml --duration 217
+  python nuisance --input lyrics.lrc  --preview
   python nuisance --input song.mid    --transparent
   python nuisance --input audio.wav   --mode spectrum --bars 80 --preview
   python nuisance --input audio.mp3   --greenscreen --title "My Track"
 
 all flags after --input are forwarded to the detected renderer.
 run a renderer directly with --help for its full flag reference:
-  python lyrics.py  --help
+  python lyrics.py    --help
   python midimap.py   --help
   python waveform.py  --help
             """
         )
-        parser.add_argument("--input", required=True,
-                            help="Input file (TTML, MIDI, or audio). Type is auto-detected from content.")
+        parser.add_argument(
+            "--input", "-i", required=True,
+            help="Input file (TTML, LRC, Enhanced LRC, MIDI, or audio). Type is auto-detected."
+        )
         args, remainder = parser.parse_known_args()
 
-        if not os.path.exists(args.input):
+        if not os.path.isfile(args.input):
             print(f"  error: file not found: {args.input}", file=sys.stderr)
             sys.exit(1)
 
         kind = identify(args.input)
 
         KIND_LABEL = {
-            "ttml":    "TTML lyrics  → lyrics.py",
-            "midi":    "MIDI file    → midimap.py",
-            "audio":   "audio file   → waveform.py",
-            "lrc":     "LRC file     (unsupported directly)",
+            "ttml":    "TTML lyrics   → lyrics.py",
+            "lrc":     "LRC lyrics    → lyrics.py",
+            "elrc":    "Enhanced LRC  → lyrics.py",
+            "midi":    "MIDI file     → midimap.py",
+            "audio":   "audio file    → waveform.py",
             "unknown": "unknown type",
         }
         print(f"\n  detected: {KIND_LABEL.get(kind, kind)}")
 
-        if kind == "lrc":
-            print(
-                "  LRC files must be converted to TTML first:\n"
-                f"    python lrc2ttml.py {args.input} --output lyrics.ttml\n"
-                "  Then re-run with the .ttml file."
-            )
-            sys.exit(1)
-
         if kind == "unknown":
             print(
                 f"  Could not identify '{args.input}' from content or extension.\n"
-                "  Supported types: TTML (.ttml/.xml), MIDI (.mid/.midi), "
-                "audio (wav/flac/ogg/mp3/aiff/m4a).",
+                "  Supported types: TTML (.ttml/.xml), LRC / Enhanced LRC (.lrc), "
+                "MIDI (.mid/.midi), audio (wav/flac/ogg/mp3/aiff/m4a/aac/opus).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -346,7 +422,6 @@ run a renderer directly with --help for its full flag reference:
     cmd = dispatch(kind, forward)
     display = " ".join(f'"{a}"' if " " in a else a for a in cmd)
     print(f"  → {display}\n")
-    import subprocess
     sys.exit(subprocess.run(cmd).returncode)
 
 

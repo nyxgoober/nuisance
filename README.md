@@ -6,10 +6,12 @@ It provides a unified CLI dispatcher ("wizard") that automatically detects input
 
 ## Components
 
-- lyrics.py   → TTML-based lyric video renderer (kinetic scrolling, timing-based animation)
-- midimap.py  → MIDI visualiser (Synthesia-style falling notes)
-- waveform.py → Audio visualiser (waveform and spectrum modes)
-- nuisance → Central dispatcher and interactive wizard
+- `lyrics.py`   → Lyric video renderer supporting TTML, LRC, and Enhanced LRC (syllable wipe, kinetic scrolling)
+- `midimap.py`  → MIDI visualiser (Synthesia-style falling notes)
+- `waveform.py` → Audio visualiser (waveform and spectrum modes)
+- `nuisance`    → Central dispatcher and interactive wizard
+- `lrc2ttml.py` → Optional LRC / Enhanced LRC → TTML conversion utility
+- `romini.py`   → Japanese romanizer for TTML, LRC, and Enhanced LRC
 
 All renderers output PNG frame sequences intended for ffmpeg encoding.
 
@@ -18,12 +20,13 @@ All renderers output PNG frame sequences intended for ffmpeg encoding.
 ## Installation
 
 ```bash
-pip install -r requirements
+pip install -r requirements.txt
 ```
 
-- Pillow is required for all renderers
-- mido is required only for MIDI processing (midimap.py)
-- soundfile and pydub is required for waveform/spectrum visualisation (waveform.py)
+- `pillow` is required for all renderers
+- `mido` is required for MIDI processing (`midimap.py`)
+- `numpy` and `soundfile` (with `pydub` / `ffmpeg` fallback) are required for waveform/spectrum visualisation (`waveform.py`)
+- `pykakasi` (optional) is used by `romini.py` for Japanese romanization
 
 ---
 
@@ -41,11 +44,10 @@ The wizard will:
 - Dispatch execution to the appropriate renderer
 
 Supported inputs:
-- TTML/XML → lyrics.py
-- MIDI (.mid, .midi) → midimap.py
-- Audio files → waveform.py
-
-LRC files are not processed directly and must be converted to TTML first using lrc2ttml.py.
+- TTML/XML (`.ttml`, `.xml`) → `lyrics.py`
+- LRC & Enhanced LRC (`.lrc`, `.elrc`) → `lyrics.py`
+- MIDI (`.mid`, `.midi`) → `midimap.py`
+- Audio files → `waveform.py`
 
 ---
 
@@ -57,12 +59,13 @@ Direct invocation with automatic routing:
 python nuisance --input song.mid
 ```
 
-All arguments after --input are forwarded to the detected renderer.
+All arguments after `--input` are forwarded to the detected renderer.
 
 Examples:
 
 ```bash
 python nuisance --input lyrics.ttml --duration 217
+python nuisance --input lyrics.lrc --preview
 python nuisance --input song.mid --transparent
 python nuisance --input audio.mp3 --mode spectrum --bars 80
 ```
@@ -75,14 +78,14 @@ Input type is determined in the following order:
 
 1. Magic byte inspection (MIDI, audio formats)
 2. XML structure detection (TTML)
-3. Text heuristics (LRC detection)
+3. Text heuristics (LRC and Enhanced LRC detection)
 4. File extension fallback
 
 Supported formats:
 
-- TTML: .ttml, .xml
-- MIDI: .mid, .midi
-- Audio: .wav, .flac, .ogg, .mp3, .aiff, .m4a, .aac, .opus
+- Lyrics: `.ttml`, `.xml`, `.lrc`, `.elrc` (both standard line-synced LRC and word/syllable-synced Enhanced LRC, including co-timed bilingual/romaji lines and `[offset:]` / `[length:]` tags)
+- MIDI: `.mid`, `.midi`
+- Audio: `.wav`, `.flac`, `.ogg`, `.mp3`, `.aiff`, `.aif`, `.m4a`, `.aac`, `.opus`
 
 ---
 
@@ -108,12 +111,14 @@ input file → renderer → PNG frame sequence → ffmpeg → final video
 
 ```
 nuisance/
-├── nuisance      # dispatcher + wizard
-├── lyrics.py        # TTML renderer
-├── midimap.py       # MIDI renderer
-├── waveform.py      # audio renderer
-├── lrc2ttml.py      # LRC conversion utility
-├── frames/          # generated output frames
+├── nuisance                     # dispatcher + wizard
+├── lyrics.py                    # TTML / LRC / Enhanced LRC renderer
+├── midimap.py                   # MIDI renderer
+├── waveform.py                  # audio renderer
+├── lrc2ttml.py                  # LRC / Enhanced LRC → TTML converter
+├── romini.py                    # Japanese romanizer (TTML & LRC)
+├── nuisancestamper.html         # browser-based syllable timing tool
+├── frames/                      # generated output frames
 ├── ZenKakuGothicNew-Bold.ttf
 ├── ZenKakuGothicNew-Regular.ttf
 └── README.md
@@ -123,7 +128,7 @@ nuisance/
 
 ## Notes
 
-- Worker threading is supported where applicable
+- Worker threading is supported across all renderers
 - Output frame rate defaults to 60 FPS
 - Missing fonts fall back to system defaults
 - The wizard is optional; CLI mode remains fully functional

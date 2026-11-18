@@ -5,24 +5,21 @@ Renders a scrolling waveform or FFT spectrum bar in the same visual style
 as Nuisance. Outputs PNG frame sequences → encode with ffmpeg.
 
 Requirements: pip install pillow numpy soundfile
-  soundfile handles WAV, FLAC, OGG, AIFF.
-  For MP3 support also install: pip install soundfile[mp3]   (uses mpg123)
-  or: pip install pydub && apt install ffmpeg  (fallback path used automatically)
-
-Usage:
-  python waveform.py --input audio.wav --duration 217
-  python waveform.py --input audio.flac --mode spectrum --bars 80
-  python waveform.py --input audio.mp3  --transparent --preview
 """
 
 import argparse
 import math
 import os
+import shutil
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ══════════════════════════════════════════
 # CONFIG
@@ -33,12 +30,12 @@ HEIGHT     = 1080
 FPS        = 60
 OUTPUT_DIR = "frames"
 
-FONT_BOLD    = "ZenKakuGothicNew-Bold.ttf"
-FONT_REGULAR = "ZenKakuGothicNew-Regular.ttf"
+FONT_BOLD    = os.path.join(_HERE, "ZenKakuGothicNew-Bold.ttf")
+FONT_REGULAR = os.path.join(_HERE, "ZenKakuGothicNew-Regular.ttf")
 
 # Visual layout
-VIZ_H        = 340      # height of the visualiser area (centred vertically)
-VIZ_Y        = (HEIGHT - VIZ_H) // 2   # top of visualiser
+VIZ_H        = 340                      # height of the visualiser area (centred vertically)
+VIZ_Y        = (HEIGHT - VIZ_H) // 2    # top of visualiser
 
 # Colours (match nuisance/midimap dark palette)
 BG_COLOR      = (8,   8,  12)
@@ -54,6 +51,7 @@ TITLE_COL     = (180, 180, 190)
 WATERMARK_COL = (60,  60,  70)
 
 SIZE_TITLE     = 52
+SIZE_TITLE_MIN = 28
 SIZE_WATERMARK = 22
 
 SHADOW_OFFSET  = 3
@@ -77,24 +75,42 @@ SPEC_PEAK_HOLD = 45     # frames a peak indicator holds before dropping
 # ══════════════════════════════════════════
 
 def clamp(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, x))
-
-def ease_out(t):
-    t = clamp(t)
-    return 1.0 - (1.0 - t) ** 3
+    return lo if x < lo else (hi if x > hi else x)
 
 def lerp(a, b, t):
     return a + (b - a) * clamp(t)
 
 def lerp_color(ca, cb, t):
     t = clamp(t)
-    return tuple(int(a + (b - a) * t) for a, b in zip(ca, cb))
+    return (
+        int(ca[0] + (cb[0] - ca[0]) * t),
+        int(ca[1] + (cb[1] - ca[1]) * t),
+        int(ca[2] + (cb[2] - ca[2]) * t),
+    )
 
 def lerp_color3(ca, cm, cb, t):
     """Three-stop colour lerp: ca→cm over [0,0.5], cm→cb over [0.5,1]."""
     if t <= 0.5:
-        return lerp_color(ca, cm, t * 2)
-    return lerp_color(cm, cb, (t - 0.5) * 2)
+        return lerp_color(ca, cm, t * 2.0)
+    return lerp_color(cm, cb, (t - 0.5) * 2.0)
+
+def alpha_paste(dst, src, x, y):
+    """In-place Porter-Duff alpha_composite with automatic bounds clipping."""
+    x, y = int(x), int(y)
+    sw, sh = src.size
+    sx0 = max(0, -x)
+    sy0 = max(0, -y)
+    dx0 = max(0, x)
+    dy0 = max(0, y)
+    w = min(sw - sx0, dst.width - dx0)
+    h = min(sh - sy0, dst.height - dy0)
+    if w <= 0 or h <= 0:
+        return
+    if sx0 == 0 and sy0 == 0 and w == sw and h == sh:
+        dst.alpha_composite(src, dest=(dx0, dy0))
+    else:
+        dst.alpha_composite(src.crop((sx0, sy0, sx0 + w, sy0 + h)), dest=(dx0, dy0))
+
 
 # ══════════════════════════════════════════
 # AUDIO LOADING
@@ -103,16 +119,17 @@ def lerp_color3(ca, cm, cb, t):
 def load_audio(path):
     """
     Load audio file → (samples_mono float32, sample_rate).
-    Tries soundfile first; falls back to pydub if soundfile can't read the format.
+    Tries soundfile first, then pydub, then direct ffmpeg pipe.
     """
-    sf_err    = None
-    pydub_err = None
+    sf_err     = None
+    pydub_err  = None
+    ffmpeg_err = None
 
     try:
         import soundfile as sf
         data, sr = sf.read(path, dtype="float32", always_2d=True)
-        mono = data.mean(axis=1)
-        return mono, sr
+        mono = data.mean(axis=1, dtype=np.float32)
+        return np.ascontiguousarray(mono, dtype=np.float32), int(sr)
     except ImportError:
         sf_err = "soundfile not installed  →  pip install soundfile"
     except Exception as e:
@@ -122,22 +139,44 @@ def load_audio(path):
         from pydub import AudioSegment
         seg  = AudioSegment.from_file(path)
         seg  = seg.set_channels(1).set_sample_width(2)
-        sr   = seg.frame_rate
+        sr   = int(seg.frame_rate)
         raw  = np.frombuffer(seg.raw_data, dtype=np.int16).astype(np.float32)
         mono = raw / 32768.0
-        return mono, sr
+        return np.ascontiguousarray(mono, dtype=np.float32), sr
     except ImportError:
         pydub_err = "pydub not installed  →  pip install pydub"
     except Exception as e:
         pydub_err = str(e)
 
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        try:
+            sr = 44100
+            proc = subprocess.run(
+                [
+                    ffmpeg_bin, "-v", "error", "-i", path,
+                    "-ac", "1", "-ar", str(sr), "-f", "f32le", "-",
+                ],
+                capture_output=True,
+                check=True,
+            )
+            mono = np.frombuffer(proc.stdout, dtype=np.float32).copy()
+            if len(mono) > 0:
+                return mono, sr
+            ffmpeg_err = "decoded 0 samples"
+        except Exception as e:
+            ffmpeg_err = str(e)
+    else:
+        ffmpeg_err = "ffmpeg not found on PATH"
+
     raise RuntimeError(
         f"Could not load '{path}'.\n"
         f"  soundfile : {sf_err}\n"
-        f"  pydub     : {pydub_err}\n\n"
-        f"Install at least one:  pip install soundfile\n"
-        f"MP3 support also needs ffmpeg on PATH."
+        f"  pydub     : {pydub_err}\n"
+        f"  ffmpeg    : {ffmpeg_err}\n\n"
+        f"Install soundfile (`pip install soundfile`) or ffmpeg."
     )
+
 
 # ══════════════════════════════════════════
 # FONT CACHE (per-thread)
@@ -146,30 +185,53 @@ def load_audio(path):
 _local = threading.local()
 
 def get_font(path, size):
-    if not hasattr(_local, "cache"):
-        _local.cache = {}
-    key = (path, int(size))
-    if key not in _local.cache:
+    cache = getattr(_local, "font_cache", None)
+    if cache is None:
+        cache = {}
+        _local.font_cache = cache
+    sz = max(8, int(size))
+    key = (path, sz)
+    fnt = cache.get(key)
+    if fnt is None:
         try:
-            _local.cache[key] = ImageFont.truetype(path, int(size))
+            fnt = ImageFont.truetype(path, sz)
         except Exception:
-            _local.cache[key] = ImageFont.load_default()
-    return _local.cache[key]
+            try:
+                fnt = ImageFont.load_default(size=sz)
+            except TypeError:
+                fnt = ImageFont.load_default()
+        cache[key] = fnt
+    return fnt
+
+def text_width(text, font):
+    if not text:
+        return 0
+    bb = font.getbbox(text)
+    return bb[2] - bb[0]
+
 
 # ══════════════════════════════════════════
-# DRAWING HELPERS
+# DRAWING HELPERS & STATIC BASE CANVAS
 # ══════════════════════════════════════════
 
-def draw_text_opaque(draw, pos, text, font, fill, alpha_mul=1.0):
+def draw_text_opaque(draw, pos, text, font, fill, alpha_mul=1.0, greenscreen=False):
+    if not text or alpha_mul <= 0.0:
+        return
     x, y = int(pos[0]), int(pos[1])
-    draw.text((x + SHADOW_OFFSET, y + SHADOW_OFFSET), text, font=font, fill=(0, 0, 0))
-    col = tuple(int(c * alpha_mul) for c in fill[:3])
+    if greenscreen:
+        sh_col = (0, 0, 0)
+        col = tuple(int(c * alpha_mul) for c in fill[:3])
+    else:
+        sh_col = lerp_color(BG_COLOR, (0, 0, 0), alpha_mul)
+        col = lerp_color(BG_COLOR, fill[:3], alpha_mul)
+    draw.text((x + SHADOW_OFFSET, y + SHADOW_OFFSET), text, font=font, fill=sh_col)
     draw.text((x, y), text, font=font, fill=col)
 
 def draw_text_transparent(img, pos, text, font, fill, alpha_mul=1.0):
+    if not text or alpha_mul <= 0.0:
+        return
     x, y = int(pos[0]), int(pos[1])
-    tmp_draw = ImageDraw.Draw(Image.new("L", (1, 1)))
-    bb  = tmp_draw.textbbox((0, 0), text, font=font)
+    bb  = font.getbbox(text)
     pad = SHADOW_BLUR * 2 + SHADOW_OFFSET + 4
     bx0 = max(0, x + bb[0] - pad)
     by0 = max(0, y + bb[1] - pad)
@@ -179,298 +241,353 @@ def draw_text_transparent(img, pos, text, font, fill, alpha_mul=1.0):
     if bw <= 0 or bh <= 0:
         return
     lx, ly = x - bx0, y - by0
-    shadow_tile = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
-    ImageDraw.Draw(shadow_tile).text(
+    tile = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).text(
         (lx + SHADOW_OFFSET, ly + SHADOW_OFFSET), text, font=font,
         fill=(0, 0, 0, int(200 * alpha_mul))
     )
-    shadow_tile = shadow_tile.filter(ImageFilter.GaussianBlur(radius=SHADOW_BLUR))
+    tile = tile.filter(ImageFilter.GaussianBlur(radius=SHADOW_BLUR))
     text_tile = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
     r, g, b = fill[:3]
     ImageDraw.Draw(text_tile).text(
         (lx, ly), text, font=font, fill=(r, g, b, int(255 * alpha_mul))
     )
-    region = img.crop((bx0, by0, bx1, by1))
-    region.alpha_composite(shadow_tile)
-    region.alpha_composite(text_tile)
-    img.paste(region, (bx0, by0))
-
-def draw_text(img, draw, pos, text, font, fill, alpha_mul=1.0, transparent=False):
-    if transparent:
-        draw_text_transparent(img, pos, text, font, fill, alpha_mul)
-    else:
-        draw_text_opaque(draw, pos, text, font, fill, alpha_mul)
+    tile.alpha_composite(text_tile)
+    alpha_paste(img, tile, bx0, by0)
 
 def rounded_rect(draw, bbox, radius, fill, alpha=255):
     x0, y0, x1, y1 = bbox
-    r = min(radius, (x1 - x0) // 2, (y1 - y0) // 2)
-    if isinstance(fill, tuple) and len(fill) == 3:
+    if x1 < x0 or y1 < y0:
+        return
+    r = max(0, min(radius, (x1 - x0) // 2, (y1 - y0) // 2))
+    if isinstance(fill, tuple) and len(fill) == 3 and draw._image.mode == "RGBA":
         fill = (*fill, alpha)
-    draw.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=fill)
+    if r == 0:
+        draw.rectangle([x0, y0, x1, y1], fill=fill)
+    else:
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=fill)
 
-def draw_glow_rect(img, bbox, color, blur_radius=GLOW_BLUR, alpha=100):
-    """Draw a soft glow behind a rectangle."""
-    x0, y0, x1, y1 = bbox
-    pad = blur_radius * 2
-    w = (x1 - x0) + pad * 2
-    h = (y1 - y0) + pad * 2
-    if w <= 0 or h <= 0:
-        return
-    tile = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    ImageDraw.Draw(tile).rectangle([pad, pad, pad + (x1-x0), pad + (y1-y0)],
-                                   fill=(*color, alpha))
-    tile = tile.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-    tx, ty = x0 - pad, y0 - pad
-    cx0 = max(0, tx);  cy0 = max(0, ty)
-    cx1 = min(img.width, tx + w);  cy1 = min(img.height, ty + h)
-    if cx1 <= cx0 or cy1 <= cy0:
-        return
-    crop = img.crop((cx0, cy0, cx1, cy1))
-    tile_crop = tile.crop((cx0 - tx, cy0 - ty, cx1 - tx, cy1 - ty))
-    crop.alpha_composite(tile_crop)
-    img.paste(crop, (cx0, cy0))
 
-# ══════════════════════════════════════════
-# CHROME (title + watermark)
-# ══════════════════════════════════════════
+def build_base_canvas(title, transparent, greenscreen):
+    """
+    Pre-render background, title, and watermark once before parallel frame rendering.
+    Since the visualiser sits inside [VIZ_Y, VIZ_Y + VIZ_H] (370..710),
+    chrome at top (y=28) and bottom (y=1020) never overlaps the visualiser!
+    """
+    if transparent:
+        base = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    elif greenscreen:
+        base = Image.new("RGB",  (WIDTH, HEIGHT), GS_COLOR)
+    else:
+        base = Image.new("RGB",  (WIDTH, HEIGHT), BG_COLOR)
+    draw = ImageDraw.Draw(base)
 
-def draw_chrome(img, draw, title, transparent, greenscreen):
     if title:
-        tf  = get_font(FONT_BOLD, SIZE_TITLE)
-        draw_text(img, draw, (120, 28), title, tf, TITLE_COL, 1.0, transparent)
+        title_fs = SIZE_TITLE
+        while title_fs > SIZE_TITLE_MIN:
+            tf = get_font(FONT_BOLD, title_fs)
+            if text_width(title, tf) <= WIDTH - 240:
+                break
+            title_fs -= 2
+        tf = get_font(FONT_BOLD, title_fs)
+        if transparent:
+            draw_text_transparent(base, (120, 28), title, tf, TITLE_COL, 1.0)
+        else:
+            draw_text_opaque(draw, (120, 28), title, tf, TITLE_COL, 1.0, greenscreen=greenscreen)
 
     wf  = get_font(FONT_REGULAR, SIZE_WATERMARK)
     wm  = "made with Nuisance"
-    tmp = ImageDraw.Draw(Image.new("L", (1, 1)))
-    wbb = tmp.textbbox((0, 0), wm, font=wf)
+    wbb = wf.getbbox(wm)
     wx  = WIDTH  - (wbb[2] - wbb[0]) - 40
     wy  = HEIGHT - (wbb[3] - wbb[1]) - 30
-    draw_text(img, draw, (wx, wy), wm, wf, WATERMARK_COL, 0.6, transparent)
-
-# ══════════════════════════════════════════
-# WAVEFORM MODE
-# ══════════════════════════════════════════
-
-def render_waveform_frame(samples, sr, frame_num, title,
-                          transparent, greenscreen):
-    t = frame_num / FPS
-
     if transparent:
-        img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    elif greenscreen:
-        img = Image.new("RGB",  (WIDTH, HEIGHT), GS_COLOR)
+        draw_text_transparent(base, (wx, wy), wm, wf, WATERMARK_COL, 0.6)
     else:
-        img = Image.new("RGB",  (WIDTH, HEIGHT), BG_COLOR)
+        draw_text_opaque(draw, (wx, wy), wm, wf, WATERMARK_COL, 0.6, greenscreen=greenscreen)
+
+    return base
+
+
+# ══════════════════════════════════════════
+# WAVEFORM MODE  (vectorized RMS + faithful global peak scaling)
+# ══════════════════════════════════════════
+
+def compute_waveform_ref_peak(samples, sr):
+    """Compute a stable track-wide RMS reference so silence stays flat."""
+    if len(samples) == 0:
+        return 1.0
+    block = max(1, int(sr * 0.005))
+    n_blocks = len(samples) // block
+    if n_blocks >= 4:
+        trimmed = samples[: n_blocks * block].reshape(n_blocks, block)
+        rms = np.sqrt(np.mean(trimmed * trimmed, axis=1))
+        ref = float(np.percentile(rms, 99.5))
+    else:
+        ref = float(np.max(np.abs(samples)))
+    return max(ref, 1e-4)
+
+
+def render_waveform_frame(samples, sr, ref_peak, base_canvas, frame_num,
+                          transparent, greenscreen, output_dir=OUTPUT_DIR):
+    t   = frame_num / FPS
+    img = base_canvas.copy()
     draw = ImageDraw.Draw(img)
 
-    # window of samples to display
-    half_w  = WAVE_WINDOW_S / 2
+    half_w  = WAVE_WINDOW_S * 0.5
     s_start = max(0, int((t - half_w) * sr))
     s_end   = min(len(samples), int((t + half_w) * sr))
     window  = samples[s_start:s_end]
 
-    cx   = WIDTH  // 2
-    cy   = HEIGHT // 2
-    draw_w = WIDTH - 240   # leave margins
-    draw_h = VIZ_H
+    cy      = HEIGHT // 2
+    draw_w  = WIDTH - 240
+    draw_h  = VIZ_H
+    x0_draw = (WIDTH - draw_w) // 2
 
     if len(window) > 1:
-        # downsample to pixel columns
-        n_cols    = draw_w
-        chunk     = max(1, len(window) // n_cols)
-        # compute RMS per chunk for a smoother envelope
-        n_chunks  = len(window) // chunk
-        rms_cols  = []
-        for ci in range(n_chunks):
-            seg = window[ci*chunk:(ci+1)*chunk]
-            rms_cols.append(float(np.sqrt(np.mean(seg**2))))
+        if len(window) >= draw_w:
+            chunk = len(window) // draw_w
+            n_chunks = min(draw_w, len(window) // chunk)
+            reshaped = window[: n_chunks * chunk].reshape(n_chunks, chunk)
+            rms_arr = np.sqrt(np.mean(reshaped * reshaped, axis=1))
+        else:
+            rms_arr = np.abs(window)
+            n_chunks = len(rms_arr)
 
-        if rms_cols:
-            peak = max(max(rms_cols), 1e-6)
-            rms_cols = [v / peak for v in rms_cols]
+        norm = np.clip(rms_arr / ref_peak, 0.0, 1.0)
 
-        # --- glow pass (RGBA tile) ---
-        x0_draw = (WIDTH - draw_w) // 2
+        if n_chunks > 1:
+            xs_local = (np.arange(n_chunks) * (draw_w / n_chunks)).astype(np.int32)
+            dy_vals  = (norm * (draw_h * 0.45)).astype(np.int32)
 
-        if len(rms_cols) > 1:
-            glow_tile = Image.new("RGBA", (draw_w, draw_h + 40), (0, 0, 0, 0))
+            pad_y   = GLOW_BLUR * 2 + 6
+            band_h  = draw_h + pad_y * 2
+            band_cy = band_h // 2
+            band_y0 = cy - band_cy
+
+            pts_up_local = list(zip(xs_local.tolist(), (band_cy - dy_vals).tolist()))
+            pts_dn_local = list(zip(xs_local.tolist(), (band_cy + dy_vals).tolist()))
+
+            # Blurred glow pass (both upper & mirrored lower envelopes, properly aligned!)
+            glow_tile = Image.new("RGBA", (draw_w, band_h), (0, 0, 0, 0))
             gd = ImageDraw.Draw(glow_tile)
-            prev_gx, prev_gy = None, None
-            for ci, v in enumerate(rms_cols):
-                gx = int(ci * draw_w / len(rms_cols))
-                gy = draw_h // 2 - int(v * draw_h * 0.45)
-                if prev_gx is not None:
-                    gd.line([(prev_gx, prev_gy + draw_h//2 - draw_h//2),
-                              (gx,     gy     + draw_h//2 - draw_h//2)],
-                            fill=(*WAVEFORM_GLOW, 180), width=6)
-                prev_gx, prev_gy = gx, gy - draw_h // 2 + draw_h // 2
+            gd.line(pts_up_local, fill=(*WAVEFORM_GLOW, 180), width=6)
+            gd.line(pts_dn_local, fill=(*WAVEFORM_GLOW, 180), width=6)
             glow_tile = glow_tile.filter(ImageFilter.GaussianBlur(radius=GLOW_BLUR))
 
             if transparent:
-                region = img.crop((x0_draw, cy - draw_h//2 - 20,
-                                   x0_draw + draw_w, cy + draw_h//2 + 20))
+                # Draw crisp waveform lines onto a tight band tile and composite once
+                line_tile = Image.new("RGBA", (draw_w, band_h), (0, 0, 0, 0))
+                ld = ImageDraw.Draw(line_tile)
+                ld.line(pts_up_local, fill=(*WAVEFORM_COL, 220), width=3)
+                ld.line(pts_dn_local, fill=(*WAVEFORM_COL, 220), width=3)
+                glow_tile.alpha_composite(line_tile)
+                alpha_paste(img, glow_tile, x0_draw, band_y0)
+            else:
+                region = img.crop((x0_draw, band_y0, x0_draw + draw_w, band_y0 + band_h)).convert("RGBA")
                 region.alpha_composite(glow_tile)
-                img.paste(region, (x0_draw, cy - draw_h//2 - 20))
-            else:
-                img_rgba = img.convert("RGBA")
-                img_rgba.alpha_composite(glow_tile, dest=(x0_draw, cy - draw_h//2 - 20))
-                img.paste(img_rgba.convert("RGB"))
+                img.paste(region.convert("RGB"), (x0_draw, band_y0))
+                draw = ImageDraw.Draw(img)
 
-        # --- main waveform line ---
-        pts = []
-        for ci, v in enumerate(rms_cols):
-            wx = x0_draw + int(ci * draw_w / len(rms_cols))
-            wy = cy - int(v * draw_h * 0.45)
-            pts.append((wx, wy))
-            # mirror below centre
-        pts_mirror = [(x, cy + (cy - y)) for x, y in pts]
+                pts_up = [(x0_draw + lx, band_y0 + ly) for lx, ly in pts_up_local]
+                pts_dn = [(x0_draw + lx, band_y0 + ly) for lx, ly in pts_dn_local]
+                draw.line(pts_up, fill=WAVEFORM_COL, width=3)
+                draw.line(pts_dn, fill=WAVEFORM_COL, width=3)
+                draw.line([(x0_draw, cy), (x0_draw + draw_w, cy)],
+                          fill=tuple(c // 4 for c in WAVEFORM_COL), width=1)
 
-        col_main = WAVEFORM_COL
+    path = os.path.join(output_dir, f"frame_{frame_num:06d}.png")
+    img.save(path, format="PNG", compress_level=1)
 
-        def draw_poly_line(point_list, color, width):
-            if len(point_list) < 2:
-                return
-            if transparent:
-                tmp_tile = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-                ImageDraw.Draw(tmp_tile).line(point_list, fill=(*color, 220), width=width)
-                img.alpha_composite(tmp_tile)
-            else:
-                draw.line(point_list, fill=color, width=width)
-
-        draw_poly_line(pts, col_main, 3)
-        draw_poly_line(pts_mirror, col_main, 3)
-
-        # centre line
-        if not transparent:
-            draw.line([(x0_draw, cy), (x0_draw + draw_w, cy)],
-                      fill=tuple(c // 4 for c in WAVEFORM_COL), width=1)
-
-    draw_chrome(img, draw, title, transparent, greenscreen)
-    path = os.path.join(OUTPUT_DIR, f"frame_{frame_num:06d}.png")
-    img.save(path)
 
 # ══════════════════════════════════════════
-# SPECTRUM MODE
+# SPECTRUM MODE  (deterministic batched FFT + thread-safe timeline)
 # ══════════════════════════════════════════
 
-# Per-thread smoothed spectrum state
-_spec_state = threading.local()
+def _build_spectrum_bin_matrix(sr, n_bars, fft_size=4096):
+    """
+    Build a (n_bars, fft_size // 2 + 1) weight matrix mapping squared FFT
+    magnitudes to log-spaced frequency bands. Interpolates narrow low-frequency
+    bands so no bass bar ever sits between FFT bins with 0 weight.
+    """
+    freqs  = np.fft.rfftfreq(fft_size, 1.0 / sr)
+    n_bins = len(freqs)
+    lo_hz  = max(1.0, float(SPEC_MIN_FREQ))
+    hi_hz  = min(float(SPEC_MAX_FREQ), max(lo_hz * 2.0, sr * 0.48))
+    edges  = np.logspace(math.log10(lo_hz), math.log10(hi_hz), n_bars + 1)
 
-def _get_spec_state(n_bars):
-    if not hasattr(_spec_state, "prev") or len(_spec_state.prev) != n_bars:
-        _spec_state.prev      = np.zeros(n_bars)
-        _spec_state.peaks     = np.zeros(n_bars)
-        _spec_state.peak_hold = np.zeros(n_bars, dtype=int)
-    return _spec_state.prev, _spec_state.peaks, _spec_state.peak_hold
+    W = np.zeros((n_bars, n_bins), dtype=np.float32)
+    df = freqs[1] - freqs[0] if n_bins > 1 else 1.0
 
-def compute_spectrum(samples, sr, t, n_bars, fft_size=4096):
-    """Return normalised bar heights [0,1] for n_bars frequency bands."""
-    half_win = fft_size / sr / 2
-    s0 = max(0, int((t - half_win) * sr))
-    s1 = min(len(samples), s0 + fft_size)
-    window = samples[s0:s1]
-    if len(window) < 64:
-        return np.zeros(n_bars)
-
-    # zero-pad to fft_size
-    padded = np.zeros(fft_size)
-    padded[:len(window)] = window * np.hanning(len(window))
-    mag = np.abs(np.fft.rfft(padded))
-    freqs = np.fft.rfftfreq(fft_size, 1.0 / sr)
-
-    # log-spaced frequency bins
-    log_lo  = math.log10(max(SPEC_MIN_FREQ, 1))
-    log_hi  = math.log10(SPEC_MAX_FREQ)
-    edges   = np.logspace(log_lo, log_hi, n_bars + 1)
-
-    bars = np.zeros(n_bars)
     for b in range(n_bars):
         mask = (freqs >= edges[b]) & (freqs < edges[b + 1])
-        if mask.any():
-            bars[b] = float(np.sqrt(np.mean(mag[mask] ** 2)))
+        cnt = int(mask.sum())
+        if cnt > 0:
+            W[b, mask] = 1.0 / cnt
+        else:
+            # Center frequency falls strictly between two adjacent FFT bins: interpolate
+            center_hz = 0.5 * (edges[b] + edges[b + 1])
+            f_idx = center_hz / df
+            i0 = max(0, min(n_bins - 1, int(math.floor(f_idx))))
+            i1 = min(n_bins - 1, i0 + 1)
+            frac = f_idx - i0
+            W[b, i0] += 1.0 - frac
+            W[b, i1] += frac
 
-    # normalise to dB-ish scale
-    bars = np.log1p(bars * 500) / math.log1p(500)
-    bars = np.clip(bars, 0, 1)
-    return bars
+    return W
 
-def render_spectrum_frame(samples, sr, frame_num, n_bars, title,
-                          transparent, greenscreen):
-    t = frame_num / FPS
 
-    if transparent:
-        img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    elif greenscreen:
-        img = Image.new("RGB",  (WIDTH, HEIGHT), GS_COLOR)
-    else:
-        img = Image.new("RGB",  (WIDTH, HEIGHT), BG_COLOR)
+def precompute_spectrum_timeline(samples, sr, total_frames, n_bars, fft_size=4096):
+    """
+    Precompute (smoothed_bars, peak_bars) of shape (total_frames, n_bars)
+    deterministically using batched NumPy rFFTs before launching worker threads.
+    Eliminates multi-threaded temporal smoothing races and flickering!
+    """
+    if total_frames <= 0:
+        return np.zeros((0, n_bars), dtype=np.float32), np.zeros((0, n_bars), dtype=np.float32)
+
+    raw_all = np.zeros((total_frames, n_bars), dtype=np.float32)
+    n_samp  = len(samples)
+
+    if n_samp >= 64:
+        W         = _build_spectrum_bin_matrix(sr, n_bars, fft_size)
+        WT        = np.ascontiguousarray(W.T)
+        win       = np.hanning(fft_size).astype(np.float32)
+        half_win  = fft_size / sr / 2.0
+        log_denom = math.log1p(500.0)
+        offsets   = np.arange(fft_size, dtype=np.int64)
+
+        # Zero-pad samples at both ends so batch slicing never goes out of bounds
+        pad_len = fft_size
+        padded_samples = np.pad(samples, (pad_len, pad_len), mode="constant")
+
+        batch_size = 512
+        for f0 in range(0, total_frames, batch_size):
+            f1 = min(total_frames, f0 + batch_size)
+            ts = np.arange(f0, f1, dtype=np.float64) / FPS
+            s0 = np.clip(((ts - half_win) * sr).astype(np.int64), 0, max(0, n_samp - 1))
+            # Validity mask for frames completely past audio end
+            valid_len = np.clip(n_samp - s0, 0, fft_size)
+            idx_mat = (s0[:, None] + pad_len) + offsets[None, :]
+            frames_win = padded_samples[idx_mat]
+            # Mask samples beyond n_samp when near end of file
+            if np.any(valid_len < fft_size):
+                col_mask = offsets[None, :] < valid_len[:, None]
+                frames_win = frames_win * col_mask
+            frames_win *= win[None, :]
+
+            spec = np.fft.rfft(frames_win, axis=1)
+            mag_sq = (spec.real * spec.real + spec.imag * spec.imag).astype(np.float32)
+            bars = np.sqrt(mag_sq @ WT)
+            bars = np.log1p(bars * 500.0) / log_denom
+            np.clip(bars, 0.0, 1.0, out=bars)
+            bars[valid_len < 64] = 0.0
+            raw_all[f0:f1] = bars
+
+    # Exact sequential causal smoothing & peak hold across all frames
+    smoothed_all = np.empty_like(raw_all)
+    peaks_all    = np.empty_like(raw_all)
+    prev         = np.zeros(n_bars, dtype=np.float32)
+    peaks        = np.zeros(n_bars, dtype=np.float32)
+    peak_hold    = np.zeros(n_bars, dtype=np.int32)
+    alpha        = float(SPEC_SMOOTHING)
+    one_minus_a  = 1.0 - alpha
+
+    for f in range(total_frames):
+        prev = alpha * prev + one_minus_a * raw_all[f]
+        smoothed_all[f] = prev
+
+        risen = prev >= peaks
+        peaks = np.where(risen, prev, peaks)
+        peak_hold = np.where(risen, SPEC_PEAK_HOLD, peak_hold)
+
+        falling = ~risen
+        holding = falling & (peak_hold > 0)
+        peak_hold = np.where(holding, peak_hold - 1, peak_hold)
+        dropping = falling & ~holding
+        peaks = np.where(dropping, np.maximum(prev, peaks - 0.015), peaks)
+        peaks_all[f] = peaks
+
+    return smoothed_all, peaks_all
+
+
+def render_spectrum_frame(smoothed_row, peaks_row, n_bars, base_canvas, frame_num,
+                          transparent, greenscreen, output_dir=OUTPUT_DIR):
+    img  = base_canvas.copy()
     draw = ImageDraw.Draw(img)
 
-    raw_bars = compute_spectrum(samples, sr, t, n_bars)
+    margin  = 120
+    total_w = WIDTH - margin * 2
+    bar_w   = max(2, (total_w - SPEC_BAR_GAP * max(0, n_bars - 1)) // n_bars)
+    max_h   = VIZ_H
+    base_y  = VIZ_Y + max_h
 
-    # temporal smoothing (per-thread state)
-    prev, peaks, peak_hold = _get_spec_state(n_bars)
-    smoothed = SPEC_SMOOTHING * prev + (1 - SPEC_SMOOTHING) * raw_bars
-    prev[:] = smoothed
+    glow_blur = 8
+    strip_pad = glow_blur * 2 + 8
+    strip_y0  = max(0, VIZ_Y - strip_pad)
+    strip_y1  = min(HEIGHT, base_y + strip_pad)
+    strip_h   = strip_y1 - strip_y0
 
-    # peak hold
-    for b in range(n_bars):
-        if smoothed[b] >= peaks[b]:
-            peaks[b]     = smoothed[b]
-            peak_hold[b] = SPEC_PEAK_HOLD
-        else:
-            if peak_hold[b] > 0:
-                peak_hold[b] -= 1
-            else:
-                peaks[b] = max(smoothed[b], peaks[b] - 0.015)
+    glow_strip = Image.new("RGBA", (WIDTH, strip_h), (0, 0, 0, 0))
+    glow_draw  = ImageDraw.Draw(glow_strip)
 
-    # layout
-    margin   = 120
-    total_w  = WIDTH - margin * 2
-    bar_w    = (total_w - SPEC_BAR_GAP * (n_bars - 1)) // n_bars
-    bar_w    = max(bar_w, 2)
-    max_h    = VIZ_H
-    base_y   = VIZ_Y + max_h    # bottom of bars
+    if transparent:
+        bar_layer = Image.new("RGBA", (WIDTH, strip_h), (0, 0, 0, 0))
+        bar_draw  = ImageDraw.Draw(bar_layer)
 
     for b in range(n_bars):
-        v     = float(smoothed[b])
-        bh    = max(4, int(v * max_h))
-        x0    = margin + b * (bar_w + SPEC_BAR_GAP)
-        x1    = x0 + bar_w
-        y0    = base_y - bh
-        y1    = base_y
+        v  = float(smoothed_row[b])
+        bh = max(4, int(v * max_h))
+        x0 = margin + b * (bar_w + SPEC_BAR_GAP)
+        x1 = x0 + bar_w
+        if x0 >= WIDTH - margin + bar_w:
+            break
+        y0 = base_y - bh
+        y1 = base_y
 
         col = lerp_color3(*SPECTRUM_COLS, v)
 
+        # Bar body
         if transparent:
-            bar_tile = Image.new("RGBA", (bar_w, bh), (0, 0, 0, 0))
-            rounded_rect(ImageDraw.Draw(bar_tile),
-                         [0, 0, bar_w, bh], SPEC_CORNER,
-                         col, alpha=220)
-            img.alpha_composite(bar_tile, dest=(x0, y0))
+            rounded_rect(
+                bar_draw,
+                [x0, y0 - strip_y0, x1, y1 - strip_y0],
+                SPEC_CORNER, col, alpha=220,
+            )
         else:
             rounded_rect(draw, [x0, y0, x1, y1], SPEC_CORNER, col)
 
-        # glow at top of bar
-        draw_glow_rect(img.convert("RGBA") if not transparent else img,
-                       [x0, y0, x1, min(y0 + 16, y1)], col,
-                       blur_radius=8, alpha=80)
+        # Bar-top glow accumulated on shared strip (1 blur per frame instead of n_bars!)
+        glow_draw.rectangle(
+            [x0, y0 - strip_y0, x1, min(y0 + 16, y1) - strip_y0],
+            fill=(*col, 85),
+        )
 
-        # peak indicator line
-        ph  = float(peaks[b])
-        py  = base_y - int(ph * max_h) - 2
-        px0, px1 = x0, x1
-        if 0 <= py < HEIGHT:
+        # Peak indicator line
+        ph = float(peaks_row[b])
+        py = base_y - int(ph * max_h) - 2
+        if strip_y0 <= py < strip_y1 - 2:
             peak_col = lerp_color3(*SPECTRUM_COLS, ph)
             if transparent:
-                pk_tile = Image.new("RGBA", (bar_w, 3), (*peak_col, 200))
-                img.alpha_composite(pk_tile, dest=(px0, py))
+                bar_draw.rectangle(
+                    [x0, py - strip_y0, x1, py - strip_y0 + 2],
+                    fill=(*peak_col, 200),
+                )
             else:
-                draw.rectangle([px0, py, px1, py + 2], fill=peak_col)
+                draw.rectangle([x0, py, x1, py + 2], fill=peak_col)
 
-    draw_chrome(img, draw, title, transparent, greenscreen)
-    path = os.path.join(OUTPUT_DIR, f"frame_{frame_num:06d}.png")
-    img.save(path)
+    glow_strip = glow_strip.filter(ImageFilter.GaussianBlur(radius=glow_blur))
+
+    if transparent:
+        bar_layer.alpha_composite(glow_strip)
+        img.alpha_composite(bar_layer, dest=(0, strip_y0))
+    else:
+        region = img.crop((0, strip_y0, WIDTH, strip_y1)).convert("RGBA")
+        region.alpha_composite(glow_strip)
+        img.paste(region.convert("RGB"), (0, strip_y0))
+
+    path = os.path.join(output_dir, f"frame_{frame_num:06d}.png")
+    img.save(path, format="PNG", compress_level=1)
+
 
 # ══════════════════════════════════════════
 # PROGRESS
@@ -481,13 +598,19 @@ _done_count    = 0
 
 def on_frame_done(total):
     global _done_count
+    if total <= 0:
+        return
     with _progress_lock:
         _done_count += 1
         i = _done_count
+    step = max(1, total // 200)
+    if i < total and (i % step) != 0:
+        return
     bar = 40
     f   = int(bar * i / total)
     pct = i / total * 100
     print(f"\r[{'█'*f}{'░'*(bar-f)}] {i}/{total}  {pct:.1f}%", end="", flush=True)
+
 
 # ══════════════════════════════════════════
 # MAIN
@@ -521,7 +644,7 @@ encode output:
         """
     )
     parser.add_argument("--input",       required=True,
-                        help="Path to audio file (WAV, FLAC, OGG, AIFF, MP3)")
+                        help="Path to audio file (WAV, FLAC, OGG, AIFF, MP3, M4A, AAC, OPUS)")
     parser.add_argument("--duration",    type=float, default=None,
                         help="Override duration in seconds (auto-detected from file if omitted)")
     parser.add_argument("--mode",        choices=["waveform", "spectrum"], default="waveform",
@@ -540,18 +663,40 @@ encode output:
                         help="Title shown in the top-left (defaults to filename stem)")
     parser.add_argument("--preview",     action="store_true",
                         help="Render 1 frame per second only — fast visual check, skips confirmation prompt")
+    parser.add_argument("--yes", "-y",   action="store_true",
+                        help="Skip interactive confirmation prompt")
     args = parser.parse_args()
 
     if args.transparent and args.greenscreen:
-        print("  error: --transparent and --greenscreen are mutually exclusive.")
-        return
+        print("  error: --transparent and --greenscreen are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.exists(args.input):
+        print(f"  error: file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"\n  Loading {args.input} …", end="", flush=True)
-    samples, sr = load_audio(args.input)
+    try:
+        samples, sr = load_audio(args.input)
+    except RuntimeError as err:
+        print(f"\n  error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(samples) == 0 or sr <= 0:
+        print("  error: audio file contains no samples.", file=sys.stderr)
+        sys.exit(1)
+
     print(f" done.  ({len(samples)/sr:.1f}s @ {sr}Hz)")
 
-    duration = args.duration if args.duration else len(samples) / sr
-    title    = args.title or os.path.splitext(os.path.basename(args.input))[0]
+    duration = args.duration if (args.duration is not None and args.duration > 0) else len(samples) / sr
+    if duration <= 0:
+        print("  error: duration must be positive.", file=sys.stderr)
+        sys.exit(1)
+
+    title       = args.title if args.title is not None else os.path.splitext(os.path.basename(args.input))[0]
+    n_bars      = max(1, args.bars)
+    workers     = max(1, args.workers)
+    start_frame = max(0, args.start)
 
     mode_str = "transparent RGBA" if args.transparent else ("green screen" if args.greenscreen else "opaque")
     print(f"  ♪ {title}")
@@ -561,27 +706,46 @@ encode output:
     total = int(duration * FPS)
 
     if args.preview:
-        frames = list(range(args.start, total, FPS))
-        print(f"  PREVIEW MODE — {len(frames)} frames (1/sec) · {args.workers} workers")
+        frames = list(range(start_frame, total, FPS))
+        print(f"  PREVIEW MODE — {len(frames)} frames (1/sec) · {workers} workers")
     else:
-        frames = list(range(args.start, total))
-        print(f"  {total} frames @ {FPS}fps · {args.workers} workers")
+        frames = list(range(start_frame, total))
+        print(f"  {len(frames)} frames @ {FPS}fps · {workers} workers")
+
+    if not frames:
+        print("  Nothing to render (0 frames).")
+        return
 
     print(f"  output → {OUTPUT_DIR}/\n")
 
-    if not args.preview:
-        if input("  Render? (y/n): ").lower() != "y":
+    if not args.preview and not args.yes:
+        try:
+            ans = input("  Render? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if ans != "y":
             return
 
-    _done_count = 0
+    base_canvas = build_base_canvas(title, args.transparent, args.greenscreen)
 
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+    if args.mode == "spectrum":
+        print("  Pre-computing FFT spectrum & peak envelopes …", end="", flush=True)
+        smoothed_all, peaks_all = precompute_spectrum_timeline(samples, sr, total, n_bars)
+        print(" done.")
+    else:
+        ref_peak = compute_waveform_ref_peak(samples, sr)
+
+    _done_count = 0
+    num_to_render = len(frames)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         if args.mode == "waveform":
             futs = {
                 ex.submit(
                     render_waveform_frame,
-                    samples, sr, f, title,
-                    args.transparent, args.greenscreen,
+                    samples, sr, ref_peak, base_canvas, f,
+                    args.transparent, args.greenscreen, OUTPUT_DIR,
                 ): f
                 for f in frames
             }
@@ -589,15 +753,15 @@ encode output:
             futs = {
                 ex.submit(
                     render_spectrum_frame,
-                    samples, sr, f, args.bars, title,
-                    args.transparent, args.greenscreen,
+                    smoothed_all[f], peaks_all[f], n_bars, base_canvas, f,
+                    args.transparent, args.greenscreen, OUTPUT_DIR,
                 ): f
                 for f in frames
             }
 
         for fut in as_completed(futs):
             fut.result()
-            on_frame_done(len(frames))
+            on_frame_done(num_to_render)
 
     print(f"\n\n  Done. Encode with:")
     if args.transparent:
