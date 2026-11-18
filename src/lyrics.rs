@@ -748,11 +748,19 @@ fn phrase_visual_state(
         return (PhraseState::Active, h, fs, false);
     }
     if (i as isize) <= last_started_idx {
+        // How far the grow-in had actually reached when this phrase stopped being active.
+        // If the phrase was active for less than GROW_IN_DUR, the grow-in was interrupted
+        // and we must shrink from the interrupted height, not the full active_h.
+        let grow_dur = p.active_end - p.begin;
+        let peak_t = ease_out(clamp(grow_dur / GROW_IN_DUR, 0.0, 1.0));
+        let peak_h = lerp(p.idle_h, p.active_h, peak_t);
+        let peak_fs = lerp(p.idle_fs as f64, SIZE_ACTIVE as f64, peak_t);
+
         let elapsed = t - p.active_end;
-        if (0.0..GROW_OUT_DUR).contains(&elapsed) {
-            let shrink_t = ease_in_out(clamp(elapsed / GROW_OUT_DUR, 0.0, 1.0));
-            let h = lerp(p.active_h, p.idle_h, shrink_t);
-            let fs = lerp(SIZE_ACTIVE as f64, p.idle_fs as f64, shrink_t) as u32;
+        let shrink_t = ease_in_out(clamp(elapsed / GROW_OUT_DUR, 0.0, 1.0));
+        if shrink_t < 1.0 {
+            let h = lerp(peak_h, p.idle_h, shrink_t);
+            let fs = lerp(peak_fs, p.idle_fs as f64, shrink_t) as u32;
             return (PhraseState::Past, h, fs, true);
         }
         return (PhraseState::Past, p.idle_h, p.idle_fs, false);
@@ -897,11 +905,10 @@ fn precompute_offsets(phrases: &[Phrase], breaks: &[Break], total_frames: usize)
                 sp[i] += (target - sp[i]) * k_below;
             } else {
                 let elapsed = t - p.active_end;
-                let k = if (0.0..GROW_OUT_DUR).contains(&elapsed) {
-                    k_past
-                } else {
-                    k_settled
-                };
+                // Smooth blend from k_past → k_settled over GROW_OUT_DUR
+                // avoids the spring constant jerk at the shrink boundary
+                let blend = clamp(elapsed / GROW_OUT_DUR, 0.0, 1.0);
+                let k = k_past + (k_settled - k_past) * blend;
                 sp[i] += (target - sp[i]) * k;
             }
         }
