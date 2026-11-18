@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings, Metrics};
@@ -23,6 +24,34 @@ struct FontPair {
 }
 
 static FONTS: OnceLock<FontPair> = OnceLock::new();
+
+/// Initialise fonts from external .ttf/.otf files. Call once before rendering.
+/// If `regular` or `bold` is `None`, the embedded default is used for that weight.
+/// Returns `Err` if a file can't be read or parsed.
+pub fn init_fonts(
+    regular: Option<&Path>,
+    bold: Option<&Path>,
+) -> Result<(), String> {
+    let load = |path: &Path, label: &str| -> Result<Font, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {} font '{}': {}", label, path.display(), e))?;
+        Font::from_bytes(bytes, FontSettings::default())
+            .map_err(|e| format!("cannot parse {} font '{}': {}", label, path.display(), e))
+    };
+
+    let reg = match regular {
+        Some(p) => load(p, "regular")?,
+        None => Font::from_bytes(REGULAR_TTF, FontSettings::default())
+            .expect("Failed to parse embedded ZenKakuGothicNew-Regular.ttf"),
+    };
+    let bld = match bold {
+        Some(p) => load(p, "bold")?,
+        None => Font::from_bytes(BOLD_TTF, FontSettings::default())
+            .expect("Failed to parse embedded ZenKakuGothicNew-Bold.ttf"),
+    };
+
+    FONTS.set(FontPair { regular: reg, bold: bld })
+        .map_err(|_| "fonts already initialised".to_owned())
+}
 
 fn fonts() -> &'static FontPair {
     FONTS.get_or_init(|| {

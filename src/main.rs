@@ -244,6 +244,14 @@ struct CommonFlags {
     /// Output directory for PNG frame sequence
     #[arg(long, default_value = "frames")]
     output_dir: PathBuf,
+
+    /// Custom regular-weight font (.ttf/.otf) — overrides the built-in font
+    #[arg(long)]
+    font: Option<PathBuf>,
+
+    /// Custom bold-weight font (.ttf/.otf) — overrides the built-in bold font
+    #[arg(long)]
+    font_bold: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -332,6 +340,27 @@ enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+}
+
+// ══════════════════════════════════════════
+// CUSTOM FONT INITIALISATION
+// ══════════════════════════════════════════
+
+fn apply_custom_fonts(regular: Option<&Path>, bold: Option<&Path>) -> Result<(), String> {
+    if regular.is_some() || bold.is_some() {
+        if let Some(p) = regular {
+            if !p.is_file() {
+                return Err(format!("custom font not found: {}", p.display()));
+            }
+        }
+        if let Some(p) = bold {
+            if !p.is_file() {
+                return Err(format!("custom bold font not found: {}", p.display()));
+            }
+        }
+        text::init_fonts(regular, bold)?;
+    }
+    Ok(())
 }
 
 // ══════════════════════════════════════════
@@ -524,6 +553,41 @@ fn run_wizard() -> Result<(), String> {
     let workers = prompt_usize("worker threads", default_workers(), 1);
     let output_dir = PathBuf::from("frames");
 
+    // Custom font prompt
+    if prompt_bool("use custom font?", false) {
+        let font_reg = loop {
+            let r = prompt_line(
+                "regular font path (.ttf/.otf, blank = built-in)",
+                Some(""),
+                false,
+            );
+            if r.is_empty() {
+                break None;
+            }
+            let p = PathBuf::from(&r);
+            if p.is_file() {
+                break Some(p);
+            }
+            println!("    file not found: {}", r);
+        };
+        let font_bold = loop {
+            let r = prompt_line(
+                "bold font path (.ttf/.otf, blank = built-in)",
+                Some(""),
+                false,
+            );
+            if r.is_empty() {
+                break None;
+            }
+            let p = PathBuf::from(&r);
+            if p.is_file() {
+                break Some(p);
+            }
+            println!("    file not found: {}", r);
+        };
+        apply_custom_fonts(font_reg.as_deref(), font_bold.as_deref())?;
+    }
+
     match kind {
         FileKind::Ttml | FileKind::Lrc | FileKind::EnhancedLrc => lyrics::run(LyricsOptions {
             input: &input_path,
@@ -579,6 +643,18 @@ fn run_app() -> Result<(), String> {
     }
 
     let cli = Cli::parse();
+
+    // Initialise custom fonts if specified (applies to both subcommand and auto-detect paths)
+    {
+        let c = match &cli.command {
+            Some(Commands::Lyrics { common, .. })
+            | Some(Commands::Midimap { common, .. })
+            | Some(Commands::Waveform { common, .. }) => common,
+            Some(Commands::Lrc2ttml { .. }) => &cli.common, // lrc2ttml doesn't render frames
+            None => &cli.common,
+        };
+        apply_custom_fonts(c.font.as_deref(), c.font_bold.as_deref())?;
+    }
 
     if let Some(cmd) = cli.command {
         return match cmd {

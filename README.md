@@ -2,7 +2,7 @@
 
 Nuisance is a standalone, zero-dependency music-to-video rendering suite written in pure Rust. It converts lyrics, MIDI, and audio files into animated 1080p PNG frame sequences ready for `ffmpeg` encoding.
 
-Bundled fonts (`ZenKakuGothicNew-Bold` & `ZenKakuGothicNew-Regular`), audio decoders, MIDI parsers, and 2D anti-aliased rendering are compiled into a single portable binary that runs natively across Linux (`musl` & `gnu`), **Termux / Android Bionic (`aarch64`, `armv7`, `x86_64`)**, macOS, and Windows.
+Bundled fonts (`ZenKakuGothicNew-Bold` & `ZenKakuGothicNew-Regular`), audio decoders, MIDI parsers, and 2D anti-aliased rendering are compiled into a single portable binary that runs natively across Linux (`musl` & `gnu`), **Termux / Android Bionic (`aarch64`, `armv7`, `x86_64`)**, macOS, and Windows. Custom fonts can be loaded at runtime via `--font` / `--font-bold` flags.
 
 ---
 
@@ -76,6 +76,22 @@ All renderers support three compositing modes:
 - **Opaque** (default): dark RGB background
 - **Transparent** (`--transparent`): straight-alpha RGBA with soft Gaussian drop-shadows
 - **Green screen** (`--greenscreen`): `#00ff00` chroma-key RGB background
+
+---
+
+## Custom Fonts
+
+The binary ships with built-in Japanese/Latin fonts, but you can swap in any `.ttf` or `.otf` at runtime — no recompilation needed:
+
+```bash
+# Replace just the regular weight
+nuisance --input song.lrc --font /path/to/MyFont-Regular.ttf
+
+# Replace both weights
+nuisance lyrics --input song.ttml --font MyFont-Regular.otf --font-bold MyFont-Bold.otf
+```
+
+The interactive wizard also offers a **"use custom font?"** prompt. Only the specified weight(s) are overridden; the other falls back to the built-in default.
 
 Encode generated frames (`frames/frame_%06d.png`) with `ffmpeg`:
 

@@ -38,6 +38,8 @@
   * `--yes` / `-y` – skip interactive confirmation prompt.
   * `--workers <n>` – number of Rayon worker threads (defaults to online CPU count, 4 MiB stack per thread for musl/Bionic safety).
   * `--output-dir <dir>` – output directory (default: `frames`).
+  * `--font <path>` – custom regular-weight font (.ttf/.otf), overrides built-in.
+  * `--font-bold <path>` – custom bold-weight font (.ttf/.otf), overrides built-in.
 
 ## Things to watch out for
 
