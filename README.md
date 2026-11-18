@@ -1,134 +1,97 @@
-# Nuisance
+# Nuisance (Rust Edition)
 
-Nuisance is a modular music-to-video rendering suite that converts musical data into animated PNG frame sequences for encoding via ffmpeg.
+Nuisance is a standalone, zero-dependency music-to-video rendering suite written in pure Rust. It converts lyrics, MIDI, and audio files into animated 1080p PNG frame sequences ready for `ffmpeg` encoding.
 
-It provides a unified CLI dispatcher ("wizard") that automatically detects input types and routes them to the appropriate renderer.
-
-## Components
-
-- `lyrics.py`   → Lyric video renderer supporting TTML, LRC, and Enhanced LRC (syllable wipe, kinetic scrolling)
-- `midimap.py`  → MIDI visualiser (Synthesia-style falling notes)
-- `waveform.py` → Audio visualiser (waveform and spectrum modes)
-- `nuisance`    → Central dispatcher and interactive wizard
-- `lrc2ttml.py` → Optional LRC / Enhanced LRC → TTML conversion utility
-- `romini.py`   → Japanese romanizer for TTML, LRC, and Enhanced LRC
-
-All renderers output PNG frame sequences intended for ffmpeg encoding.
+Bundled fonts (`ZenKakuGothicNew-Bold` & `ZenKakuGothicNew-Regular`), audio decoders, MIDI parsers, and 2D anti-aliased rendering are compiled into a single portable binary that runs natively across Linux (`musl` & `gnu`), **Termux / Android Bionic (`aarch64`, `armv7`, `x86_64`)**, macOS, and Windows.
 
 ---
 
-## Installation
+## Quick Start
+
+Download a prebuilt binary from Releases, or build from source:
 
 ```bash
-pip install -r requirements.txt
+cargo build --release
 ```
 
-- `pillow` is required for all renderers
-- `mido` is required for MIDI processing (`midimap.py`)
-- `numpy` and `soundfile` (with `pydub` / `ffmpeg` fallback) are required for waveform/spectrum visualisation (`waveform.py`)
-- `pykakasi` (optional) is used by `romini.py` for Japanese romanization
+The standalone executable is generated at `./target/release/nuisance` (or `nuisance.exe` on Windows).
 
 ---
 
-## Wizard Mode (Recommended)
+## Interactive Wizard Mode (Recommended)
 
 Run without arguments to launch the interactive wizard:
 
 ```bash
-python nuisance
+./nuisance
 ```
 
-The wizard will:
-- Detect file type automatically
-- Prompt only for relevant parameters
-- Dispatch execution to the appropriate renderer
-
-Supported inputs:
-- TTML/XML (`.ttml`, `.xml`) → `lyrics.py`
-- LRC & Enhanced LRC (`.lrc`, `.elrc`) → `lyrics.py`
-- MIDI (`.mid`, `.midi`) → `midimap.py`
-- Audio files → `waveform.py`
+The wizard automatically inspects file content, asks only relevant options, and renders in-process using parallel worker threads.
 
 ---
 
-## CLI Mode
+## CLI Mode (Auto-Detecting)
 
-Direct invocation with automatic routing:
+Pass `--input` / `-i` and Nuisance detects the input type automatically from magic bytes, XML structure, or LRC tags:
 
 ```bash
-python nuisance --input song.mid
+nuisance --input lyrics.ttml --duration 217
+nuisance --input lyrics.lrc --preview
+nuisance --input song.mid --transparent --lookahead 4.0
+nuisance --input audio.mp3 --mode spectrum --bars 80
 ```
 
-All arguments after `--input` are forwarded to the detected renderer.
+---
 
-Examples:
+## Explicit Subcommands
+
+Each renderer and converter can also be invoked directly as a subcommand:
 
 ```bash
-python nuisance --input lyrics.ttml --duration 217
-python nuisance --input lyrics.lrc --preview
-python nuisance --input song.mid --transparent
-python nuisance --input audio.mp3 --mode spectrum --bars 80
+nuisance lyrics   --input song.lrc --romanise romaji.lrc
+nuisance midimap  --input song.mid --transparent
+nuisance waveform --input audio.flac --mode spectrum --bars 80
+nuisance lrc2ttml song.lrc --output song.ttml
+```
+
+Run `nuisance --help` or `nuisance <subcommand> --help` for full flag details.
+
+---
+
+## Supported Formats
+
+1. **Lyrics (`lyrics` renderer)**:
+   - **TTML / XML** (`.ttml`, `.xml`) — syllable/word `<span>` wipes or line-synced `<p>` blocks
+   - **LRC & Enhanced LRC** (`.lrc`, `.elrc`) — `<mm:ss.xx>` word/syllable tags, `[offset:]`, `[length:]`, chorus repeat tags, empty-line break markers, co-timed bilingual/romaji sub-lines, and UTF-8/UTF-16/Shift-JIS/GB18030 encodings
+2. **MIDI (`midimap` renderer)**:
+   - Standard MIDI Files (`.mid`, `.midi` — Type 0, 1, and 2) → Synthesia-style falling notes with 88-key active hit glow
+3. **Audio (`waveform` renderer)**:
+   - Pure-Rust decoding (`symphonia`) for `.wav`, `.flac`, `.ogg`, `.mp3`, `.aiff`, `.m4a`, `.aac`, plus automatic `ffmpeg` fallback if installed (e.g. `.opus`)
+
+---
+
+## Output Modes & Encoding
+
+All renderers support three compositing modes:
+- **Opaque** (default): dark RGB background
+- **Transparent** (`--transparent`): straight-alpha RGBA with soft Gaussian drop-shadows
+- **Green screen** (`--greenscreen`): `#00ff00` chroma-key RGB background
+
+Encode generated frames (`frames/frame_%06d.png`) with `ffmpeg`:
+
+```bash
+ffmpeg -framerate 60 -i frames/frame_%06d.png -i audio.mp3 \
+       -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
 ```
 
 ---
 
-## File Detection
+## Multi-Platform CI / Releases
 
-Input type is determined in the following order:
+[`.github/workflows/build.yml`](.github/workflows/build.yml) automatically tests and builds standalone archives for:
+- **Linux**: `x86_64-unknown-linux-musl` (static), `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
+- **Termux / Android Bionic (API 24+)**: `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`
+- **macOS**: `aarch64-apple-darwin` (Apple Silicon), `x86_64-apple-darwin` (Intel)
+- **Windows**: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
 
-1. Magic byte inspection (MIDI, audio formats)
-2. XML structure detection (TTML)
-3. Text heuristics (LRC and Enhanced LRC detection)
-4. File extension fallback
-
-Supported formats:
-
-- Lyrics: `.ttml`, `.xml`, `.lrc`, `.elrc` (both standard line-synced LRC and word/syllable-synced Enhanced LRC, including co-timed bilingual/romaji lines and `[offset:]` / `[length:]` tags)
-- MIDI: `.mid`, `.midi`
-- Audio: `.wav`, `.flac`, `.ogg`, `.mp3`, `.aiff`, `.aif`, `.m4a`, `.aac`, `.opus`
-
----
-
-## Output Modes
-
-All renderers support the following output modes:
-
-- opaque: standard RGB video
-- transparent: RGBA output for compositing
-- green screen: solid chroma key background
-
----
-
-## Rendering Pipeline
-
-All inputs follow the same pipeline:
-
-input file → renderer → PNG frame sequence → ffmpeg → final video
-
----
-
-## File Structure
-
-```
-nuisance/
-├── nuisance                     # dispatcher + wizard
-├── lyrics.py                    # TTML / LRC / Enhanced LRC renderer
-├── midimap.py                   # MIDI renderer
-├── waveform.py                  # audio renderer
-├── lrc2ttml.py                  # LRC / Enhanced LRC → TTML converter
-├── romini.py                    # Japanese romanizer (TTML & LRC)
-├── nuisancestamper.html         # browser-based syllable timing tool
-├── frames/                      # generated output frames
-├── ZenKakuGothicNew-Bold.ttf
-├── ZenKakuGothicNew-Regular.ttf
-└── README.md
-```
-
----
-
-## Notes
-
-- Worker threading is supported across all renderers
-- Output frame rate defaults to 60 FPS
-- Missing fonts fall back to system defaults
-- The wizard is optional; CLI mode remains fully functional
+Pushing a version tag (`v*` or `V*`) automatically publishes all binaries and `SHA256SUMS.txt` to GitHub Releases.

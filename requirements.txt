@@ -1,5 +1,0 @@
-pillow
-numpy
-mido
-soundfile
-pydub

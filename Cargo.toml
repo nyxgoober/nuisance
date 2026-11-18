@@ -1,0 +1,41 @@
+[package]
+name = "nuisance"
+version = "0.6.0"
+edition = "2021"
+description = "Modular music-to-video rendering suite (TTML/LRC/Enhanced LRC lyrics, Synthesia MIDI, audio waveform & spectrum)"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "nuisance"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+encoding_rs = "0.8"
+fontdue = "0.9"
+midly = "0.5"
+png = "0.17"
+rayon = "1.10"
+realfft = "3.4"
+regex = "1.11"
+roxmltree = "0.20"
+symphonia = { version = "0.5", default-features = false, features = [
+    "pcm",
+    "wav",
+    "flac",
+    "ogg",
+    "vorbis",
+    "mp3",
+    "aac",
+    "isomp4",
+    "aiff",
+    "alac",
+    "mkv",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
